@@ -41,5 +41,6 @@ LaneZstd/
 ## Development Guide
 - Build: `dotnet build LaneZstd.slnx`
 - Test: `dotnet test LaneZstd.slnx`
+- Publish: `dotnet publish src/LaneZstd.Cli/LaneZstd.Cli.csproj -c Release -p:PublishDir=./publish/`
 - Typecheck: use `dotnet build LaneZstd.slnx`
 - Verify changes: `dotnet build LaneZstd.slnx && dotnet test LaneZstd.slnx`
