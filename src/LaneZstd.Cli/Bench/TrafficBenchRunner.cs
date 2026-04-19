@@ -36,7 +36,13 @@ public sealed record BenchDirectionMetrics(
     double CompressionSavings,
     long Lost,
     long Duplicated,
-    long Corrupted);
+    long Corrupted,
+    BenchCorruptionMetrics Corruption);
+
+public sealed record BenchCorruptionMetrics(
+    long JsonInvalid,
+    long DirectionMismatch,
+    long ChecksumMismatch);
 
 public sealed record BenchResult(
     bool IsSuccessful,
@@ -63,12 +69,14 @@ public sealed record BenchResult(
     private static string FormatDirection(BenchDirectionMetrics metrics) =>
         string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"{metrics.Direction} messages_sent={metrics.MessagesSent} messages_received={metrics.MessagesReceived} raw_bytes={metrics.RawBytes} framed_bytes={metrics.FramedBytes} raw_Bps={metrics.RawBytesPerSecond:F2} framed_Bps={metrics.FramedBytesPerSecond:F2} ratio={metrics.CompressionRatio:F2} savings={metrics.CompressionSavings:F2} raw_frames={metrics.RawFrames} compressed_frames={metrics.CompressedFrames} lost={metrics.Lost} duplicated={metrics.Duplicated} corrupted={metrics.Corrupted}");
+            $"{metrics.Direction} messages_sent={metrics.MessagesSent} messages_received={metrics.MessagesReceived} raw_bytes={metrics.RawBytes} framed_bytes={metrics.FramedBytes} raw_Bps={metrics.RawBytesPerSecond:F2} framed_Bps={metrics.FramedBytesPerSecond:F2} ratio={metrics.CompressionRatio:F2} savings={metrics.CompressionSavings:F2} raw_frames={metrics.RawFrames} compressed_frames={metrics.CompressedFrames} lost={metrics.Lost} duplicated={metrics.Duplicated} corrupted={metrics.Corrupted} corrupted_json={metrics.Corruption.JsonInvalid} corrupted_direction={metrics.Corruption.DirectionMismatch} corrupted_checksum={metrics.Corruption.ChecksumMismatch}");
 }
 
 public static class TrafficBenchRunner
 {
     private const int SessionPortCount = CliDefaults.BenchSessionPortCount;
+    private static readonly TimeSpan DrainIdleThreshold = TimeSpan.FromMilliseconds(150);
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(2);
 
     public static async Task<BenchResult> RunAsync(BenchConfig config, Action<string>? log = null, CancellationToken cancellationToken = default)
     {
@@ -127,15 +135,17 @@ public static class TrafficBenchRunner
                 await Task.Delay(config.Warmup, runCancellationSource.Token);
             }
 
+            edgeToHubTracker.BeginMeasurement();
+            hubToEdgeTracker.BeginMeasurement();
             var baselineCapturedAt = stopwatch.Elapsed;
             var edgeBaseline = edgeCounters.Snapshot(1);
             var hubBaseline = hubCounters.Snapshot(1);
             log?.Invoke($"bench warmup complete after {baselineCapturedAt.TotalSeconds:F2}s; collecting stats for {config.Duration.TotalSeconds:F2}s");
 
             await Task.WhenAll(edgeSenderTask, hubSenderTask);
-            await Task.Delay(TimeSpan.FromMilliseconds(250), runCancellationSource.Token);
+            await WaitForDrainAsync(edgeToHubTracker, hubToEdgeTracker, runCancellationSource.Token);
 
-            var measurementWindow = stopwatch.Elapsed - baselineCapturedAt;
+            var measurementWindow = config.Duration;
             var edgeDelta = Subtract(edgeCounters.Snapshot(1), edgeBaseline);
             var hubDelta = Subtract(hubCounters.Snapshot(1), hubBaseline);
 
@@ -161,7 +171,7 @@ public static class TrafficBenchRunner
 
     private static async Task<IPEndPoint> EstablishSessionAsync(Socket clientSocket, Socket gameSocket, int edgeGamePort, int seed, CancellationToken cancellationToken)
     {
-        var payload = TrafficPayloadFactory.Create("edge->hub", sequence: -1, seed, averagePayloadBytes: 128, minPayloadBytes: 64, maxPayloadBytes: 160);
+        var payload = TrafficPayloadFactory.Create("edge->hub", sequence: -1, seed, averagePayloadBytes: 384, minPayloadBytes: 320, maxPayloadBytes: 448);
         await clientSocket.SendToAsync(payload.Bytes, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, edgeGamePort), cancellationToken);
         var receiveResult = await ReceiveAsync(gameSocket, cancellationToken);
         if (!TrafficPayloadValidator.TryValidate(receiveResult.Buffer, "edge->hub", out _, out _))
@@ -202,11 +212,24 @@ public static class TrafficBenchRunner
             }
 
             var generated = TrafficPayloadFactory.Create(direction, sequence, random, config.AveragePayloadBytes, config.MinPayloadBytes, config.MaxPayloadBytes);
-            await socket.SendToAsync(generated.Bytes, SocketFlags.None, destination, cancellationToken);
-
-            if (stopwatch.Elapsed >= config.Warmup)
+            var shouldMeasure = dueAt >= config.Warmup;
+            if (shouldMeasure)
             {
                 tracker.RecordSent(sequence, generated.Checksum);
+            }
+
+            try
+            {
+                await socket.SendToAsync(generated.Bytes, SocketFlags.None, destination, cancellationToken);
+            }
+            catch
+            {
+                if (shouldMeasure)
+                {
+                    tracker.RollbackSent(sequence);
+                }
+
+                throw;
             }
 
             sequence++;
@@ -222,11 +245,11 @@ public static class TrafficBenchRunner
                 var receiveResult = await ReceiveAsync(socket, cancellationToken);
                 if (!TrafficPayloadValidator.TryValidate(receiveResult.Buffer, expectedDirection, out var payload, out var error))
                 {
-                    tracker.RecordCorrupted();
+                    tracker.RecordCorrupted(payload, error);
                     continue;
                 }
 
-                tracker.RecordReceived(payload!.Sequence, payload.Checksum, error is null);
+                tracker.RecordReceived(payload!.Sequence, payload.Checksum);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -252,7 +275,31 @@ public static class TrafficBenchRunner
             CompressionSavings: delta.CompressionSavings,
             Lost: tracker.Lost,
             Duplicated: tracker.Duplicated,
-            Corrupted: tracker.Corrupted);
+            Corrupted: tracker.Corrupted,
+            Corruption: tracker.Corruption);
+    }
+
+    private static async Task WaitForDrainAsync(TrafficDirectionTracker edgeToHubTracker, TrafficDirectionTracker hubToEdgeTracker, CancellationToken cancellationToken)
+    {
+        var drainStartedAt = Stopwatch.GetTimestamp();
+
+        while (edgeToHubTracker.HasPendingExpected || hubToEdgeTracker.HasPendingExpected)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var drainElapsed = Stopwatch.GetElapsedTime(drainStartedAt);
+            if (drainElapsed >= DrainTimeout)
+            {
+                break;
+            }
+
+            if (edgeToHubTracker.IdleTime >= DrainIdleThreshold && hubToEdgeTracker.IdleTime >= DrainIdleThreshold)
+            {
+                break;
+            }
+
+            await Task.Delay(10, cancellationToken);
+        }
     }
 
     private static RuntimeStatsSnapshot Subtract(RuntimeStatsSnapshot current, RuntimeStatsSnapshot baseline) => new(
@@ -356,31 +403,65 @@ internal sealed class TrafficDirectionTracker
 {
     private readonly ConcurrentDictionary<long, string> _sentChecksums = new();
     private readonly ConcurrentDictionary<long, byte> _receivedSequences = new();
-    private long _corrupted;
     private long _duplicates;
+    private long _jsonInvalid;
+    private long _directionMismatch;
+    private long _checksumMismatch;
+    private long _measurementStarted;
+    private long _lastActivityTimestamp = Stopwatch.GetTimestamp();
 
     public long Sent => _sentChecksums.Count;
 
     public long Received => _receivedSequences.Count;
 
-    public long Corrupted => Interlocked.Read(ref _corrupted);
+    public long Corrupted => Interlocked.Read(ref _jsonInvalid) + Interlocked.Read(ref _directionMismatch) + Interlocked.Read(ref _checksumMismatch);
 
     public long Duplicated => Interlocked.Read(ref _duplicates);
 
     public long Lost => Math.Max(0, Sent - Received);
 
-    public void RecordSent(long sequence, string checksum) => _sentChecksums.TryAdd(sequence, checksum);
+    public BenchCorruptionMetrics Corruption => new(
+        JsonInvalid: Interlocked.Read(ref _jsonInvalid),
+        DirectionMismatch: Interlocked.Read(ref _directionMismatch),
+        ChecksumMismatch: Interlocked.Read(ref _checksumMismatch));
 
-    public void RecordReceived(long sequence, string checksum, bool checksumValid)
+    public bool HasPendingExpected => Sent > Received;
+
+    public TimeSpan IdleTime => Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastActivityTimestamp));
+
+    public void BeginMeasurement()
+    {
+        Interlocked.Exchange(ref _measurementStarted, 1);
+        Touch();
+    }
+
+    public void RecordSent(long sequence, string checksum)
+    {
+        if (_sentChecksums.TryAdd(sequence, checksum))
+        {
+            Touch();
+        }
+    }
+
+    public void RollbackSent(long sequence)
+    {
+        if (_sentChecksums.TryRemove(sequence, out _))
+        {
+            Touch();
+        }
+    }
+
+    public void RecordReceived(long sequence, string checksum)
     {
         if (!_sentChecksums.TryGetValue(sequence, out var expectedChecksum))
         {
             return;
         }
 
-        if (!checksumValid || !string.Equals(expectedChecksum, checksum, StringComparison.Ordinal))
+        if (!string.Equals(expectedChecksum, checksum, StringComparison.Ordinal))
         {
-            Interlocked.Increment(ref _corrupted);
+            Interlocked.Increment(ref _checksumMismatch);
+            Touch();
             return;
         }
 
@@ -388,9 +469,48 @@ internal sealed class TrafficDirectionTracker
         {
             Interlocked.Increment(ref _duplicates);
         }
+
+        Touch();
     }
 
-    public void RecordCorrupted() => Interlocked.Increment(ref _corrupted);
+    public void RecordCorrupted(TrafficPayload? payload, TrafficPayloadValidationError error)
+    {
+        if (payload is not null && !_sentChecksums.ContainsKey(payload.Sequence))
+        {
+            return;
+        }
+
+        switch (error)
+        {
+            case TrafficPayloadValidationError.ChecksumMismatch:
+                if (payload is not null)
+                {
+                    Interlocked.Increment(ref _checksumMismatch);
+                    Touch();
+                }
+
+                break;
+            case TrafficPayloadValidationError.UnexpectedDirection:
+                if (payload is not null)
+                {
+                    Interlocked.Increment(ref _directionMismatch);
+                    Touch();
+                }
+
+                break;
+            case TrafficPayloadValidationError.JsonInvalid:
+            case TrafficPayloadValidationError.NullPayload:
+                if (Interlocked.Read(ref _measurementStarted) == 1)
+                {
+                    Interlocked.Increment(ref _jsonInvalid);
+                    Touch();
+                }
+
+                break;
+        }
+    }
+
+    private void Touch() => Interlocked.Exchange(ref _lastActivityTimestamp, Stopwatch.GetTimestamp());
 }
 
 public static class TrafficPayloadFactory
@@ -401,38 +521,65 @@ public static class TrafficPayloadFactory
     public static GeneratedTrafficPayload Create(string direction, long sequence, Random random, int averagePayloadBytes, int minPayloadBytes, int maxPayloadBytes)
     {
         var targetBytes = SampleTargetSize(random, averagePayloadBytes, minPayloadBytes, maxPayloadBytes);
-        var flags = new[] { random.Next(0, 2), random.Next(0, 8), random.Next(0, 32) };
-        var tags = Enumerable.Range(0, random.Next(2, 5)).Select(index => $"tag-{index}-{random.Next(10, 99)}").ToArray();
-        var samples = BuildSamples(random, targetBytes);
-        var unsigned = BuildUnsigned(direction, sequence, random, flags, tags, samples, paddingLength: 0);
+        var flags = BuildFlags(random, targetBytes);
+        var tags = BuildTags(random, targetBytes);
+        var traceId = $"{sequence:x8}-{random.Next(0, 65536):x4}";
+        var accountId = random.Next(1, 1000);
+        var roomId = random.Next(1, 128);
+        var samples = BuildSamples(random, Math.Min(targetBytes, maxPayloadBytes));
+        var unsigned = BuildUnsigned(direction, sequence, traceId, accountId, roomId, flags, tags, samples, paddingLength: 0);
         var signed = AddChecksum(unsigned);
-        var paddingLength = Math.Max(0, targetBytes - signed.Bytes.Length - 16);
 
-        for (var iteration = 0; iteration < 8; iteration++)
+        while (signed.Bytes.Length > maxPayloadBytes && (samples.Length > 1 || tags.Length > 1))
         {
-            unsigned = BuildUnsigned(direction, sequence, random, flags, tags, samples, paddingLength);
-            signed = AddChecksum(unsigned);
-            if (signed.Bytes.Length >= minPayloadBytes && signed.Bytes.Length <= maxPayloadBytes)
+            if (samples.Length > 1)
             {
-                return signed;
+                samples = samples[..^1];
+            }
+            else
+            {
+                tags = tags[..^1];
             }
 
-            paddingLength = Math.Max(0, paddingLength + (targetBytes - signed.Bytes.Length));
+            unsigned = BuildUnsigned(direction, sequence, traceId, accountId, roomId, flags, tags, samples, paddingLength: 0);
+            signed = AddChecksum(unsigned);
         }
 
-        while (signed.Bytes.Length > maxPayloadBytes && paddingLength > 0)
+        if (signed.Bytes.Length > maxPayloadBytes)
         {
-            paddingLength -= Math.Min(paddingLength, signed.Bytes.Length - maxPayloadBytes);
-            unsigned = BuildUnsigned(direction, sequence, random, flags, tags, samples, paddingLength);
-            signed = AddChecksum(unsigned);
+            throw new InvalidOperationException($"Failed to generate benchmark payload within {minPayloadBytes}-{maxPayloadBytes} bytes.");
+        }
+
+        var minPadding = Math.Max(0, minPayloadBytes - signed.Bytes.Length);
+        var maxPadding = Math.Max(0, maxPayloadBytes - signed.Bytes.Length);
+        var targetPadding = Math.Clamp(targetBytes - signed.Bytes.Length, minPadding, maxPadding);
+
+        unsigned = BuildUnsigned(direction, sequence, traceId, accountId, roomId, flags, tags, samples, targetPadding);
+        signed = AddChecksum(unsigned);
+
+        if (signed.Bytes.Length < minPayloadBytes || signed.Bytes.Length > maxPayloadBytes)
+        {
+            throw new InvalidOperationException($"Generated benchmark payload length {signed.Bytes.Length} outside {minPayloadBytes}-{maxPayloadBytes} bytes.");
         }
 
         return signed;
     }
 
+    private static int[] BuildFlags(Random random, int targetBytes)
+    {
+        var flagCount = Math.Clamp(targetBytes / 240, 0, 3);
+        var flags = new int[flagCount];
+        for (var index = 0; index < flagCount; index++)
+        {
+            flags[index] = random.Next(0, 32);
+        }
+
+        return flags;
+    }
+
     private static int[] BuildSamples(Random random, int targetBytes)
     {
-        var sampleCount = Math.Clamp(targetBytes / 24, 4, 80);
+        var sampleCount = Math.Clamp(targetBytes / 96, 0, 80);
         var samples = new int[sampleCount];
         for (var index = 0; index < sampleCount; index++)
         {
@@ -442,16 +589,28 @@ public static class TrafficPayloadFactory
         return samples;
     }
 
-    private static TrafficPayloadUnsigned BuildUnsigned(string direction, long sequence, Random random, int[] flags, string[] tags, int[] samples, int paddingLength)
+    private static string[] BuildTags(Random random, int targetBytes)
+    {
+        var tagCount = Math.Clamp(targetBytes / 220, 0, 4);
+        var tags = new string[tagCount];
+        for (var index = 0; index < tagCount; index++)
+        {
+            tags[index] = $"tag-{index}-{random.Next(10, 99)}";
+        }
+
+        return tags;
+    }
+
+    private static TrafficPayloadUnsigned BuildUnsigned(string direction, long sequence, string traceId, int accountId, int roomId, int[] flags, string[] tags, int[] samples, int paddingLength)
     {
         return new TrafficPayloadUnsigned(
             SchemaVersion: 1,
             Direction: direction,
             Sequence: sequence,
             SentAtUnixMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            TraceId: $"{sequence:x8}-{random.NextInt64():x16}",
-            AccountId: random.Next(1000, 100000),
-            RoomId: random.Next(1, 2048),
+            TraceId: traceId,
+            AccountId: accountId,
+            RoomId: roomId,
             Flags: flags,
             Samples: samples,
             Tags: tags,
@@ -503,23 +662,23 @@ public static class TrafficPayloadFactory
 
 public static class TrafficPayloadValidator
 {
-    public static bool TryValidate(byte[] buffer, string expectedDirection, out TrafficPayload? payload, out string? error)
+    public static bool TryValidate(byte[] buffer, string expectedDirection, out TrafficPayload? payload, out TrafficPayloadValidationError error)
     {
         payload = null;
-        error = null;
+        error = TrafficPayloadValidationError.None;
 
         try
         {
             payload = JsonSerializer.Deserialize(buffer, TrafficPayloadJsonContext.Default.TrafficPayload);
             if (payload is null)
             {
-                error = "Payload deserialized as null.";
+                error = TrafficPayloadValidationError.NullPayload;
                 return false;
             }
 
             if (!string.Equals(payload.Direction, expectedDirection, StringComparison.Ordinal))
             {
-                error = $"Unexpected direction {payload.Direction}.";
+                error = TrafficPayloadValidationError.UnexpectedDirection;
                 return false;
             }
 
@@ -537,18 +696,27 @@ public static class TrafficPayloadValidator
                 payload.Padding));
             if (!string.Equals(payload.Checksum, checksum, StringComparison.Ordinal))
             {
-                error = "Checksum mismatch.";
+                error = TrafficPayloadValidationError.ChecksumMismatch;
                 return false;
             }
 
             return true;
         }
-        catch (JsonException exception)
+        catch (JsonException)
         {
-            error = exception.Message;
+            error = TrafficPayloadValidationError.JsonInvalid;
             return false;
         }
     }
+}
+
+public enum TrafficPayloadValidationError
+{
+    None = 0,
+    JsonInvalid = 1,
+    NullPayload = 2,
+    UnexpectedDirection = 3,
+    ChecksumMismatch = 4,
 }
 
 public sealed record GeneratedTrafficPayload(TrafficPayload Payload, string Checksum, byte[] Bytes);
@@ -580,6 +748,7 @@ public sealed record TrafficPayloadUnsigned(
     string[] Tags,
     string Padding);
 
+[JsonSerializable(typeof(BenchCorruptionMetrics))]
 [JsonSerializable(typeof(BenchConfig))]
 [JsonSerializable(typeof(BenchDirectionMetrics))]
 [JsonSerializable(typeof(BenchResult))]

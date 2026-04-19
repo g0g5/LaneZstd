@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using LaneZstd.Core;
+using LaneZstd.Protocol;
 
 namespace LaneZstd.Cli;
 
@@ -18,7 +19,7 @@ internal static class CliDefaults
     public const int BenchMessagesPerSecond = 200;
     public const int BenchAveragePayloadBytes = 700;
     public const int BenchMinPayloadBytes = 50;
-    public const int BenchMaxPayloadBytes = 1350;
+    public const int BenchMaxPayloadBytes = MaxPacketSize - ProtocolConstants.HeaderSize;
     public const int BenchSessionPortCount = 4;
     public const string BenchOutputFormat = "text";
 }
