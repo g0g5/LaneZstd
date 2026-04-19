@@ -13,6 +13,14 @@ internal static class CliDefaults
     public const int StatsIntervalSeconds = 5;
     public const int SessionIdleTimeoutSeconds = 30;
     public const int UnspecifiedMaxSessions = -1;
+    public const int BenchDurationSeconds = 30;
+    public const int BenchWarmupSeconds = 3;
+    public const int BenchMessagesPerSecond = 200;
+    public const int BenchAveragePayloadBytes = 700;
+    public const int BenchMinPayloadBytes = 50;
+    public const int BenchMaxPayloadBytes = 1350;
+    public const int BenchSessionPortCount = 4;
+    public const string BenchOutputFormat = "text";
 }
 
 public static class CliApplication
@@ -127,6 +135,116 @@ public static class CliApplication
             Description = "Stats interval in seconds. Zero disables periodic stats.",
         };
 
+        var benchDurationSecondsOption = new Option<int>("--duration-seconds")
+        {
+            Description = "Measured benchmark duration in seconds.",
+        };
+        var benchWarmupSecondsOption = new Option<int>("--warmup-seconds")
+        {
+            Description = "Warmup duration in seconds before metrics are recorded.",
+        };
+        var benchMessagesPerSecondOption = new Option<int>("--messages-per-second")
+        {
+            Description = "Per-direction send rate.",
+        };
+        var benchAveragePayloadBytesOption = new Option<int>("--avg-payload-bytes")
+        {
+            Description = "Target average JSON payload size in bytes.",
+        };
+        var benchMinPayloadBytesOption = new Option<int>("--min-payload-bytes")
+        {
+            Description = "Minimum generated JSON payload size in bytes.",
+        };
+        var benchMaxPayloadBytesOption = new Option<int>("--max-payload-bytes")
+        {
+            Description = "Maximum generated JSON payload size in bytes.",
+        };
+        var benchSeedOption = new Option<int?>("--seed")
+        {
+            Description = "Optional random seed for reproducible payload generation.",
+        };
+        var benchOutputOption = new Option<string>("--output")
+        {
+            Description = "Benchmark output format: text or json.",
+        };
+        var benchCompressThresholdOption = new Option<int>("--compress-threshold")
+        {
+            Description = "Compression threshold in bytes.",
+        };
+        var benchCompressionLevelOption = new Option<int>("--compression-level")
+        {
+            Description = "Zstd compression level.",
+        };
+        var benchMaxPacketSizeOption = new Option<int>("--max-packet-size")
+        {
+            Description = "Maximum framed UDP packet size.",
+        };
+        var benchStatsIntervalOption = new Option<int>("--stats-interval")
+        {
+            Description = "Stats interval in seconds. Zero disables periodic stats.",
+        };
+
+        var benchCommand = new Command("bench", "Run local loopback traffic benchmark")
+        {
+            benchDurationSecondsOption,
+            benchWarmupSecondsOption,
+            benchMessagesPerSecondOption,
+            benchAveragePayloadBytesOption,
+            benchMinPayloadBytesOption,
+            benchMaxPayloadBytesOption,
+            benchSeedOption,
+            benchOutputOption,
+            benchCompressThresholdOption,
+            benchCompressionLevelOption,
+            benchMaxPacketSizeOption,
+            benchStatsIntervalOption,
+        };
+
+        benchCommand.Validators.Add(result =>
+        {
+            ValidateSharedRuntimeOptions(result, benchCompressThresholdOption, benchCompressionLevelOption, benchMaxPacketSizeOption, benchStatsIntervalOption);
+
+            if (GetOptionValue(result, benchDurationSecondsOption, CliDefaults.BenchDurationSeconds) < 1)
+            {
+                result.AddError("--duration-seconds must be at least 1.");
+            }
+
+            if (GetOptionValue(result, benchWarmupSecondsOption, CliDefaults.BenchWarmupSeconds) < 0)
+            {
+                result.AddError("--warmup-seconds must be zero or greater.");
+            }
+
+            if (GetOptionValue(result, benchMessagesPerSecondOption, CliDefaults.BenchMessagesPerSecond) < 1)
+            {
+                result.AddError("--messages-per-second must be at least 1.");
+            }
+
+            var averagePayloadBytes = GetOptionValue(result, benchAveragePayloadBytesOption, CliDefaults.BenchAveragePayloadBytes);
+            var minPayloadBytes = GetOptionValue(result, benchMinPayloadBytesOption, CliDefaults.BenchMinPayloadBytes);
+            var maxPayloadBytes = GetOptionValue(result, benchMaxPayloadBytesOption, CliDefaults.BenchMaxPayloadBytes);
+            if (minPayloadBytes < 1)
+            {
+                result.AddError("--min-payload-bytes must be at least 1.");
+            }
+
+            if (maxPayloadBytes < minPayloadBytes)
+            {
+                result.AddError("--max-payload-bytes must be greater than or equal to --min-payload-bytes.");
+            }
+
+            if (averagePayloadBytes < minPayloadBytes || averagePayloadBytes > maxPayloadBytes)
+            {
+                result.AddError("--avg-payload-bytes must be within --min-payload-bytes and --max-payload-bytes.");
+            }
+
+            var outputFormat = GetOptionValue(result, benchOutputOption, CliDefaults.BenchOutputFormat);
+            if (!string.Equals(outputFormat, "text", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(outputFormat, "json", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddError("--output must be either text or json.");
+            }
+        });
+
         var hubCommand = new Command("hub", "Run hub node")
         {
             hubBindOption,
@@ -186,12 +304,14 @@ public static class CliApplication
             verboseOption,
             edgeCommand,
             hubCommand,
+            benchCommand,
         };
 
         return new CliDefinition(
             rootCommand,
             edgeCommand,
             hubCommand,
+            benchCommand,
             verboseOption,
             edgeBindOption,
             edgeHubOption,
@@ -208,7 +328,19 @@ public static class CliApplication
             hubCompressThresholdOption,
             hubCompressionLevelOption,
             hubMaxPacketSizeOption,
-            hubStatsIntervalOption);
+            hubStatsIntervalOption,
+            benchDurationSecondsOption,
+            benchWarmupSecondsOption,
+            benchMessagesPerSecondOption,
+            benchAveragePayloadBytesOption,
+            benchMinPayloadBytesOption,
+            benchMaxPayloadBytesOption,
+            benchSeedOption,
+            benchOutputOption,
+            benchCompressThresholdOption,
+            benchCompressionLevelOption,
+            benchMaxPacketSizeOption,
+            benchStatsIntervalOption);
     }
 
     private static void ValidateEndpointOption(CommandResult result, Option<string> option, string alias, bool allowWildcard, string? fallbackValue = null)
@@ -276,6 +408,7 @@ public sealed class CliDefinition(
     RootCommand rootCommand,
     Command edgeCommand,
     Command hubCommand,
+    Command benchCommand,
     Option<bool> verboseOption,
     Option<string> edgeBindOption,
     Option<string> edgeHubOption,
@@ -292,7 +425,19 @@ public sealed class CliDefinition(
     Option<int> hubCompressThresholdOption,
     Option<int> hubCompressionLevelOption,
     Option<int> hubMaxPacketSizeOption,
-    Option<int> hubStatsIntervalOption)
+    Option<int> hubStatsIntervalOption,
+    Option<int> benchDurationSecondsOption,
+    Option<int> benchWarmupSecondsOption,
+    Option<int> benchMessagesPerSecondOption,
+    Option<int> benchAveragePayloadBytesOption,
+    Option<int> benchMinPayloadBytesOption,
+    Option<int> benchMaxPayloadBytesOption,
+    Option<int?> benchSeedOption,
+    Option<string> benchOutputOption,
+    Option<int> benchCompressThresholdOption,
+    Option<int> benchCompressionLevelOption,
+    Option<int> benchMaxPacketSizeOption,
+    Option<int> benchStatsIntervalOption)
 {
     public RootCommand RootCommand { get; } = rootCommand;
 
@@ -347,6 +492,33 @@ public sealed class CliDefinition(
                 GetOptionValue(parseResult, hubCompressionLevelOption, CliDefaults.CompressionLevel),
                 GetOptionValue(parseResult, hubMaxPacketSizeOption, CliDefaults.MaxPacketSize),
                 GetOptionValue(parseResult, hubStatsIntervalOption, CliDefaults.StatsIntervalSeconds)));
+
+        return true;
+    }
+
+    public bool TryGetBenchConfig(ParseResult parseResult, out BenchConfig? config, out IReadOnlyList<string> errors)
+    {
+        config = null;
+        errors = GetErrors(parseResult);
+        if (errors.Count > 0 || parseResult.CommandResult.Command != benchCommand)
+        {
+            return false;
+        }
+
+        config = new BenchConfig(
+            Duration: TimeSpan.FromSeconds(GetOptionValue(parseResult, benchDurationSecondsOption, CliDefaults.BenchDurationSeconds)),
+            Warmup: TimeSpan.FromSeconds(GetOptionValue(parseResult, benchWarmupSecondsOption, CliDefaults.BenchWarmupSeconds)),
+            MessagesPerSecond: GetOptionValue(parseResult, benchMessagesPerSecondOption, CliDefaults.BenchMessagesPerSecond),
+            AveragePayloadBytes: GetOptionValue(parseResult, benchAveragePayloadBytesOption, CliDefaults.BenchAveragePayloadBytes),
+            MinPayloadBytes: GetOptionValue(parseResult, benchMinPayloadBytesOption, CliDefaults.BenchMinPayloadBytes),
+            MaxPayloadBytes: GetOptionValue(parseResult, benchMaxPayloadBytesOption, CliDefaults.BenchMaxPayloadBytes),
+            Seed: parseResult.GetValue(benchSeedOption) ?? Environment.TickCount,
+            OutputFormat: GetOptionValue(parseResult, benchOutputOption, CliDefaults.BenchOutputFormat).ToLowerInvariant(),
+            Runtime: new RuntimeOptions(
+                GetOptionValue(parseResult, benchCompressThresholdOption, CliDefaults.CompressThreshold),
+                GetOptionValue(parseResult, benchCompressionLevelOption, CliDefaults.CompressionLevel),
+                GetOptionValue(parseResult, benchMaxPacketSizeOption, CliDefaults.MaxPacketSize),
+                GetOptionValue(parseResult, benchStatsIntervalOption, CliDefaults.StatsIntervalSeconds)));
 
         return true;
     }
@@ -407,6 +579,20 @@ public static class Program
             var runtime = new HubRuntime(hubConfig!, log: Console.WriteLine, verbose: cli.IsVerbose(parseResult));
             await runtime.RunAsync(cancellationSource.Token);
             return 0;
+        }
+
+        if (cli.TryGetBenchConfig(parseResult, out var benchConfig, out _))
+        {
+            using var cancellationSource = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, eventArgs) =>
+            {
+                eventArgs.Cancel = true;
+                cancellationSource.Cancel();
+            };
+
+            var result = await TrafficBenchRunner.RunAsync(benchConfig!, Console.WriteLine, cancellationSource.Token);
+            Console.WriteLine(result.FormatSummary(benchConfig!.OutputFormat));
+            return result.IsSuccessful ? 0 : 1;
         }
 
         return parseResult.Invoke();

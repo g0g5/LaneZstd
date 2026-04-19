@@ -42,5 +42,7 @@ LaneZstd/
 - Build: `dotnet build LaneZstd.slnx`
 - Test: `dotnet test LaneZstd.slnx`
 - Publish: `dotnet publish src/LaneZstd.Cli/LaneZstd.Cli.csproj -c Release -p:PublishDir=./publish/`
+- Benchmark: `dotnet run --project src/LaneZstd.Cli/LaneZstd.Cli.csproj -- bench`
+- Benchmark example: `dotnet run --project src/LaneZstd.Cli/LaneZstd.Cli.csproj -- bench --duration-seconds 30 --warmup-seconds 3 --messages-per-second 200 --avg-payload-bytes 700 --min-payload-bytes 50 --max-payload-bytes 1350 --max-packet-size 1400 --output text`
 - Typecheck: use `dotnet build LaneZstd.slnx`
 - Verify changes: `dotnet build LaneZstd.slnx && dotnet test LaneZstd.slnx`

@@ -169,4 +169,43 @@ public class CliTests
         Assert.Contains("--max-packet-size must be at least 128.", errors);
         Assert.Contains("--stats-interval must be zero or greater.", errors);
     }
+
+    [Fact]
+    public void BenchCommand_MapsConfigAndDefaults()
+    {
+        var cli = CliApplication.BuildCli();
+        var parseResult = cli.RootCommand.Parse([
+            "bench",
+            "--duration-seconds", "15",
+            "--warmup-seconds", "2",
+            "--messages-per-second", "120",
+            "--avg-payload-bytes", "700",
+            "--min-payload-bytes", "50",
+            "--max-payload-bytes", "1350",
+            "--seed", "1234",
+            "--output", "json",
+            "--compress-threshold", "80",
+            "--compression-level", "5",
+            "--max-packet-size", "1400",
+            "--stats-interval", "0",
+        ]);
+
+        var success = cli.TryGetBenchConfig(parseResult, out var config, out var errors);
+
+        Assert.True(success);
+        Assert.Empty(errors);
+        Assert.NotNull(config);
+        Assert.Equal(TimeSpan.FromSeconds(15), config.Duration);
+        Assert.Equal(TimeSpan.FromSeconds(2), config.Warmup);
+        Assert.Equal(120, config.MessagesPerSecond);
+        Assert.Equal(700, config.AveragePayloadBytes);
+        Assert.Equal(50, config.MinPayloadBytes);
+        Assert.Equal(1350, config.MaxPayloadBytes);
+        Assert.Equal(1234, config.Seed);
+        Assert.Equal("json", config.OutputFormat);
+        Assert.Equal(80, config.Runtime.CompressThreshold);
+        Assert.Equal(5, config.Runtime.CompressionLevel);
+        Assert.Equal(1400, config.Runtime.MaxPacketSize);
+        Assert.Equal(0, config.Runtime.StatsIntervalSeconds);
+    }
 }
