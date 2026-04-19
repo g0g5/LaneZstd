@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LaneZstd.Cli/LaneZstd.Cli.csproj" />
+    <Project Path="src/LaneZstd.Core/LaneZstd.Core.csproj" />
+    <Project Path="src/LaneZstd.Protocol/LaneZstd.Protocol.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LaneZstd.Tests/LaneZstd.Tests.csproj" />
+  </Folder>
+</Solution>

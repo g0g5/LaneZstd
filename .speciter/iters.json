@@ -1,0 +1,14 @@
+{
+    "iterations": [
+        {
+            "time": "2026-04-19T18:30:55.957215",
+            "name": "udp-v1-hub-sessions",
+            "stage": "completed"
+        },
+        {
+            "time": "2026-04-19T15:37:40.882055",
+            "name": "obsolete-udp-v1-foundation",
+            "stage": "terminated"
+        }
+    ]
+}

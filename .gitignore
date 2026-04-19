@@ -1,0 +1,27 @@
+.opencode/commands/
+
+# Build outputs
+**/[Bb]in/
+**/[Oo]bj/
+artifacts/
+publish/
+
+# Test results and coverage
+TestResults/
+coverage/
+coverage-*/
+*.coverage
+*.coveragexml
+
+# User- and machine-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# IDE folders
+.vs/
+.idea/
+_ReSharper*/
+*.DotSettings.user
