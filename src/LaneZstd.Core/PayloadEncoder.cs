@@ -31,7 +31,7 @@ public sealed class PayloadEncoder : IDisposable
             return new PayloadEncodeResult(PayloadEncodingKind.DroppedOversize, payload.Length, 0, 0);
         }
 
-        if (destination.Length < BufferSizing.MaxCompressedPayloadSize)
+        if (destination.Length < BufferSizing.MaxCompressedDatagramSize)
         {
             throw new ArgumentException("Destination buffer is smaller than the configured compression bound.", nameof(destination));
         }

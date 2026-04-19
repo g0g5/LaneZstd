@@ -45,7 +45,7 @@ public sealed class HubRuntime
         {
             await Task.WhenAll(
                 RuntimeStatsReporter.RunPeriodicAsync("hub", _counters, _config.MaxSessions, _config.Runtime.StatsIntervalSeconds, _log, cancellationToken),
-                UdpSocketIO.RunReceivePumpAsync(tunnelSocket, bufferSizing.MaxReceiveBufferSize, CreateReceiveEndPoint(_config.BindEndpoint.Address), tunnelReceiveChannel.Writer, _counters, _log, cancellationToken),
+                UdpSocketIO.RunReceivePumpAsync(tunnelSocket, bufferSizing.MaxTunnelReceiveBufferSize, CreateReceiveEndPoint(_config.BindEndpoint.Address), tunnelReceiveChannel.Writer, _counters, _log, cancellationToken),
                 RunTunnelDispatchLoopAsync(tunnelReceiveChannel.Reader, tunnelDataWriters, tunnelSocket, gameEndPoint, bufferSizing, sessionManager, cancellationToken),
                 Task.WhenAll(tunnelDataWorkers),
                 RunTimeoutLoopAsync(tunnelSocket, sessionManager, cancellationToken));
@@ -164,7 +164,7 @@ public sealed class HubRuntime
         HubSessionManager sessionManager,
         CancellationToken cancellationToken)
     {
-        var decodeBuffer = new byte[bufferSizing.MaxPayloadSize];
+        var decodeBuffer = new byte[bufferSizing.MaxDatagramPayloadSize];
         using var decoder = new PayloadDecoder();
 
         try
@@ -352,7 +352,7 @@ public sealed class HubRuntime
     {
         var gameChannel = UdpSocketIO.CreateDatagramChannel(_config.Runtime.ReceiveQueueCapacity, singleReader: true);
         return Task.WhenAll(
-            UdpSocketIO.RunReceivePumpAsync(session.GameSocket, bufferSizing.MaxPayloadSize, CreateReceiveEndPoint(_config.GameEndpoint.Address), gameChannel.Writer, _counters, _log, cancellationToken),
+            UdpSocketIO.RunReceivePumpAsync(session.GameSocket, bufferSizing.MaxDatagramPayloadSize, CreateReceiveEndPoint(_config.GameEndpoint.Address), gameChannel.Writer, _counters, _log, cancellationToken),
             RunSessionProcessLoopAsync(session, gameChannel.Reader, tunnelSocket, gameEndPoint, bufferSizing, cancellationToken));
     }
 
@@ -364,8 +364,8 @@ public sealed class HubRuntime
         RuntimeBufferSizing bufferSizing,
         CancellationToken cancellationToken)
     {
-        var receiveBuffer = new byte[bufferSizing.MaxPayloadSize];
-        var encodedPayloadBuffer = new byte[bufferSizing.MaxCompressedPayloadSize];
+        var receiveBuffer = new byte[bufferSizing.MaxDatagramPayloadSize];
+        var encodedPayloadBuffer = new byte[bufferSizing.MaxCompressedDatagramSize];
         var frameBuffer = new byte[bufferSizing.MaxPacketSize];
         using var encoder = new PayloadEncoder(_config.Runtime, bufferSizing);
 

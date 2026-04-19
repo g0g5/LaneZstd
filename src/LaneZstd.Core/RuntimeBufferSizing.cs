@@ -5,18 +5,25 @@ namespace LaneZstd.Core;
 
 public sealed record RuntimeBufferSizing(
     int MaxPacketSize,
-    int MaxPayloadSize,
-    int MaxCompressedPayloadSize,
-    int MaxReceiveBufferSize)
+    int MaxTunnelPayloadSize,
+    int MaxDatagramPayloadSize,
+    int MaxCompressedDatagramSize,
+    int MaxTunnelReceiveBufferSize)
 {
+    private const int MaxProtocolPayloadSize = ushort.MaxValue;
+
     public static RuntimeBufferSizing Create(int maxPacketSize)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxPacketSize, ProtocolConstants.HeaderSize + 1);
 
-        var maxPayloadSize = maxPacketSize - ProtocolConstants.HeaderSize;
-        var maxCompressedPayloadSize = checked((int)Compressor.GetCompressBound(maxPayloadSize));
-        var maxReceiveBufferSize = Math.Max(maxPacketSize, maxCompressedPayloadSize);
+        var maxTunnelPayloadSize = maxPacketSize - ProtocolConstants.HeaderSize;
+        var maxCompressedDatagramSize = checked((int)Compressor.GetCompressBound(MaxProtocolPayloadSize));
 
-        return new RuntimeBufferSizing(maxPacketSize, maxPayloadSize, maxCompressedPayloadSize, maxReceiveBufferSize);
+        return new RuntimeBufferSizing(
+            maxPacketSize,
+            maxTunnelPayloadSize,
+            MaxProtocolPayloadSize,
+            maxCompressedDatagramSize,
+            maxPacketSize);
     }
 }

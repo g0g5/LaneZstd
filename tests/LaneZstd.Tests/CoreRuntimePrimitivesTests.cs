@@ -12,9 +12,10 @@ public sealed class CoreRuntimePrimitivesTests
         var sizing = RuntimeBufferSizing.Create(1200);
 
         Assert.Equal(1200, sizing.MaxPacketSize);
-        Assert.Equal(1186, sizing.MaxPayloadSize);
-        Assert.True(sizing.MaxCompressedPayloadSize >= sizing.MaxPayloadSize);
-        Assert.Equal(sizing.MaxCompressedPayloadSize, sizing.MaxReceiveBufferSize);
+        Assert.Equal(1186, sizing.MaxTunnelPayloadSize);
+        Assert.Equal(ushort.MaxValue, sizing.MaxDatagramPayloadSize);
+        Assert.True(sizing.MaxCompressedDatagramSize >= sizing.MaxDatagramPayloadSize);
+        Assert.Equal(1200, sizing.MaxTunnelReceiveBufferSize);
     }
 
     [Fact]
@@ -40,7 +41,7 @@ public sealed class CoreRuntimePrimitivesTests
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
         var payload = Encoding.ASCII.GetBytes("small-packet");
-        var buffer = new byte[sizing.MaxCompressedPayloadSize];
+        var buffer = new byte[sizing.MaxCompressedDatagramSize];
 
         var result = encoder.Encode(payload, buffer, out var bytesWritten);
 
@@ -57,7 +58,7 @@ public sealed class CoreRuntimePrimitivesTests
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
         var payload = Encoding.ASCII.GetBytes(new string('A', 256));
-        var buffer = new byte[sizing.MaxCompressedPayloadSize];
+        var buffer = new byte[sizing.MaxCompressedDatagramSize];
 
         var result = encoder.Encode(payload, buffer, out var bytesWritten);
 
@@ -74,7 +75,7 @@ public sealed class CoreRuntimePrimitivesTests
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
         var payload = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
-        var buffer = new byte[sizing.MaxCompressedPayloadSize];
+        var buffer = new byte[sizing.MaxCompressedDatagramSize];
 
         var result = encoder.Encode(payload, buffer, out var bytesWritten);
 
@@ -90,14 +91,31 @@ public sealed class CoreRuntimePrimitivesTests
         var runtime = new RuntimeOptions(CompressThreshold: 4096, CompressionLevel: 3, MaxPacketSize: 128, StatsIntervalSeconds: 5, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1);
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
-        var payload = Enumerable.Repeat((byte)1, sizing.MaxPayloadSize + 1).ToArray();
-        var buffer = new byte[sizing.MaxCompressedPayloadSize];
+        var payload = Enumerable.Repeat((byte)1, sizing.MaxTunnelPayloadSize + 1).ToArray();
+        var buffer = new byte[sizing.MaxCompressedDatagramSize];
 
         var result = encoder.Encode(payload, buffer, out var bytesWritten);
 
         Assert.Equal(PayloadEncodingKind.DroppedOversize, result.Kind);
         Assert.True(result.IsOversizeDrop);
         Assert.Equal(0, bytesWritten);
+    }
+
+    [Fact]
+    public void PayloadEncoder_CanCompressPayloadLargerThanRawFrameCeiling()
+    {
+        var runtime = new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 5, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1);
+        var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
+        using var encoder = new PayloadEncoder(runtime, sizing);
+        var payload = Encoding.ASCII.GetBytes(new string('A', sizing.MaxTunnelPayloadSize + 128));
+        var buffer = new byte[sizing.MaxCompressedDatagramSize];
+
+        var result = encoder.Encode(payload, buffer, out var bytesWritten);
+
+        Assert.Equal(PayloadEncodingKind.Compressed, result.Kind);
+        Assert.True(result.IsCompressed);
+        Assert.True(bytesWritten < payload.Length);
+        Assert.True(result.FramedLength <= runtime.MaxPacketSize);
     }
 
     [Fact]

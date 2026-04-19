@@ -44,8 +44,8 @@ public sealed class EdgeRuntime
 
             await Task.WhenAll(
                 RuntimeStatsReporter.RunPeriodicAsync("edge", _counters, maxSessions: 1, _config.Runtime.StatsIntervalSeconds, _log, cancellationToken),
-                UdpSocketIO.RunReceivePumpAsync(gameSocket, bufferSizing.MaxPayloadSize, CreateReceiveEndPoint(_config.GameListenEndpoint.Address), gameChannel.Writer, _counters, _log, cancellationToken),
-                UdpSocketIO.RunReceivePumpAsync(tunnelSocket, bufferSizing.MaxReceiveBufferSize, CreateReceiveEndPoint(_config.BindEndpoint.Address), tunnelChannel.Writer, _counters, _log, cancellationToken),
+                UdpSocketIO.RunReceivePumpAsync(gameSocket, bufferSizing.MaxDatagramPayloadSize, CreateReceiveEndPoint(_config.GameListenEndpoint.Address), gameChannel.Writer, _counters, _log, cancellationToken),
+                UdpSocketIO.RunReceivePumpAsync(tunnelSocket, bufferSizing.MaxTunnelReceiveBufferSize, CreateReceiveEndPoint(_config.BindEndpoint.Address), tunnelChannel.Writer, _counters, _log, cancellationToken),
                 RunGameWorkersAsync(gameChannel.Reader, tunnelSocket, hubEndPoint, bufferSizing, cancellationToken),
                 RunTunnelProcessLoopAsync(tunnelChannel.Reader, gameSocket, hubEndPoint, bufferSizing, cancellationToken));
         }
@@ -129,8 +129,8 @@ public sealed class EdgeRuntime
         RuntimeBufferSizing bufferSizing,
         CancellationToken cancellationToken)
     {
-        var receiveBuffer = new byte[bufferSizing.MaxPayloadSize];
-        var encodedPayloadBuffer = new byte[bufferSizing.MaxCompressedPayloadSize];
+        var receiveBuffer = new byte[bufferSizing.MaxDatagramPayloadSize];
+        var encodedPayloadBuffer = new byte[bufferSizing.MaxCompressedDatagramSize];
         var frameBuffer = new byte[bufferSizing.MaxPacketSize];
         using var encoder = new PayloadEncoder(_config.Runtime, bufferSizing);
 
@@ -206,8 +206,8 @@ public sealed class EdgeRuntime
         RuntimeBufferSizing bufferSizing,
         CancellationToken cancellationToken)
     {
-        var receiveBuffer = new byte[bufferSizing.MaxReceiveBufferSize];
-        var decodeBuffer = new byte[bufferSizing.MaxPayloadSize];
+        var receiveBuffer = new byte[bufferSizing.MaxTunnelReceiveBufferSize];
+        var decodeBuffer = new byte[bufferSizing.MaxDatagramPayloadSize];
         using var decoder = new PayloadDecoder();
 
         try
