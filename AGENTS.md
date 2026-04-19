@@ -8,7 +8,9 @@ LaneZstd/
 |- src/                                       # Production code
 |  |- LaneZstd.Cli/                           # CLI app for launching edge or hub modes
 |  |  |- LaneZstd.Cli.csproj                  # Executable project definition and package references
-|  |  \- Program.cs                           # CLI entrypoint, command graph, option validation, config mapping
+|  |  |- Program.cs                           # CLI entrypoint, command graph, option validation, config mapping
+|  |  \- Bench/                               # Local loopback benchmark runner and traffic payload helpers
+|  |     \- TrafficBenchRunner.cs             # Bench command execution, fake client/server traffic, metrics, and JSON payload validation
 |  |- LaneZstd.Core/                          # Runtime orchestration for UDP forwarding and session flow
 |  |  |- LaneZstd.Core.csproj                 # Core library definition; references protocol and compression support
 |  |  |- EdgeRuntime.cs                       # Edge-side tunnel runtime loop
@@ -35,7 +37,8 @@ LaneZstd/
       |- ProtocolTests.cs                     # Frame codec and protocol correctness coverage
       |- EdgeRuntimeTests.cs                  # Edge runtime behavior tests
       |- HubRuntimeTests.cs                   # Hub runtime behavior tests
-      \- MultiEdgeIntegrationTests.cs         # Multi-node integration scenarios
+       |- MultiEdgeIntegrationTests.cs         # Multi-node integration scenarios
+       \- RealisticTrafficIntegrationTests.cs  # Short bidirectional benchmark smoke test for realistic JSON traffic
 ```
 
 ## Development Guide
