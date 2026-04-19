@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using LaneZstd.Core;
 
@@ -35,7 +36,7 @@ public sealed class CoreRuntimePrimitivesTests
     [Fact]
     public void PayloadEncoder_UsesRawForSmallPayloads()
     {
-        var runtime = new RuntimeOptions(CompressThreshold: 96, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 5);
+        var runtime = new RuntimeOptions(CompressThreshold: 96, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 5, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1);
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
         var payload = Encoding.ASCII.GetBytes("small-packet");
@@ -52,7 +53,7 @@ public sealed class CoreRuntimePrimitivesTests
     [Fact]
     public void PayloadEncoder_UsesCompressedWhenItIsBeneficial()
     {
-        var runtime = new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 5);
+        var runtime = new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 5, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1);
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
         var payload = Encoding.ASCII.GetBytes(new string('A', 256));
@@ -69,7 +70,7 @@ public sealed class CoreRuntimePrimitivesTests
     [Fact]
     public void PayloadEncoder_FallsBackToRawWhenCompressionIsNotBeneficial()
     {
-        var runtime = new RuntimeOptions(CompressThreshold: 1, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 5);
+        var runtime = new RuntimeOptions(CompressThreshold: 1, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 5, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1);
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
         var payload = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
@@ -86,7 +87,7 @@ public sealed class CoreRuntimePrimitivesTests
     [Fact]
     public void PayloadEncoder_DropsOversizePayloadWhenRawFrameWouldExceedCeiling()
     {
-        var runtime = new RuntimeOptions(CompressThreshold: 4096, CompressionLevel: 3, MaxPacketSize: 128, StatsIntervalSeconds: 5);
+        var runtime = new RuntimeOptions(CompressThreshold: 4096, CompressionLevel: 3, MaxPacketSize: 128, StatsIntervalSeconds: 5, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1);
         var sizing = RuntimeBufferSizing.Create(runtime.MaxPacketSize);
         using var encoder = new PayloadEncoder(runtime, sizing);
         var payload = Enumerable.Repeat((byte)1, sizing.MaxPayloadSize + 1).ToArray();
@@ -139,6 +140,14 @@ public sealed class CoreRuntimePrimitivesTests
             OversizeDrop: 5,
             ProtocolError: 6,
             DecompressError: 7,
+            EncodeOperations: 18,
+            EncodeElapsedTicks: Stopwatch.Frequency / 10,
+            DecodeOperations: 19,
+            DecodeElapsedTicks: Stopwatch.Frequency / 20,
+            QueueEnqueued: 20,
+            QueueDequeued: 21,
+            QueueDropped: 22,
+            QueueCompleted: 23,
             UnknownSession: 8,
             SessionSenderMismatch: 9,
             PortPoolExhausted: 10,
@@ -157,11 +166,17 @@ public sealed class CoreRuntimePrimitivesTests
         Assert.Contains("game_out=15", line);
         Assert.Contains("raw_out=16", line);
         Assert.Contains("zstd_out=17", line);
+        Assert.Contains("encode_ops=18", line);
+        Assert.Contains("decode_ops=19", line);
         Assert.Contains("raw_bytes_in=200", line);
         Assert.Contains("framed_bytes_out=150", line);
         Assert.Contains("drop_oversize=5", line);
         Assert.Contains("proto_err=6", line);
         Assert.Contains("zstd_err=7", line);
+        Assert.Contains("queue_in=20", line);
+        Assert.Contains("queue_out=21", line);
+        Assert.Contains("queue_drop=22", line);
+        Assert.Contains("queue_done=23", line);
         Assert.Contains("unknown_session=8", line);
         Assert.Contains("sender_mismatch=9", line);
         Assert.Contains("pool_exhausted=10", line);

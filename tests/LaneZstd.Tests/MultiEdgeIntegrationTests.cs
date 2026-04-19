@@ -19,7 +19,7 @@ public sealed class MultiEdgeIntegrationTests
         var edge2GamePort = ReserveUdpPort();
         var sessionPortRange = ReserveUdpPortRange(2);
 
-        var runtimeOptions = new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 0);
+        var runtimeOptions = new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 0, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1);
         var hubConfig = new HubConfig(
             new UdpEndpoint(IPAddress.Loopback, hubPort),
             new UdpEndpoint(IPAddress.Loopback, gamePort),

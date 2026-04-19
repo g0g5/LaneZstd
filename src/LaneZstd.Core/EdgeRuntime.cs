@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading.Channels;
 using LaneZstd.Protocol;
 
 namespace LaneZstd.Core;
@@ -31,9 +33,8 @@ public sealed class EdgeRuntime
         var gameSocket = CreateBoundSocket(_config.GameListenEndpoint);
         var hubEndPoint = ToIPEndPoint(_config.HubEndpoint);
         var bufferSizing = RuntimeBufferSizing.Create(_config.Runtime.MaxPacketSize);
-
-        using var encoder = new PayloadEncoder(_config.Runtime, bufferSizing);
-        using var decoder = new PayloadDecoder();
+        var gameChannel = UdpSocketIO.CreateDatagramChannel(_config.Runtime.ReceiveQueueCapacity, singleReader: _config.Runtime.ReceiveWorkerCount == 1);
+        var tunnelChannel = UdpSocketIO.CreateDatagramChannel(_config.Runtime.ReceiveQueueCapacity, singleReader: true);
 
         _log?.Invoke($"edge tunnel listening on {_config.BindEndpoint}; game listening on {_config.GameListenEndpoint}; hub {hubEndPoint}");
 
@@ -43,8 +44,10 @@ public sealed class EdgeRuntime
 
             await Task.WhenAll(
                 RuntimeStatsReporter.RunPeriodicAsync("edge", _counters, maxSessions: 1, _config.Runtime.StatsIntervalSeconds, _log, cancellationToken),
-                RunGameLoopAsync(gameSocket, tunnelSocket, hubEndPoint, encoder, bufferSizing, cancellationToken),
-                RunTunnelLoopAsync(tunnelSocket, gameSocket, hubEndPoint, decoder, bufferSizing, cancellationToken));
+                UdpSocketIO.RunReceivePumpAsync(gameSocket, bufferSizing.MaxPayloadSize, CreateReceiveEndPoint(_config.GameListenEndpoint.Address), gameChannel.Writer, _counters, _log, cancellationToken),
+                UdpSocketIO.RunReceivePumpAsync(tunnelSocket, bufferSizing.MaxReceiveBufferSize, CreateReceiveEndPoint(_config.BindEndpoint.Address), tunnelChannel.Writer, _counters, _log, cancellationToken),
+                RunGameWorkersAsync(gameChannel.Reader, tunnelSocket, hubEndPoint, bufferSizing, cancellationToken),
+                RunTunnelProcessLoopAsync(tunnelChannel.Reader, gameSocket, hubEndPoint, bufferSizing, cancellationToken));
         }
         finally
         {
@@ -102,167 +105,173 @@ public sealed class EdgeRuntime
         }
     }
 
-    private async Task RunGameLoopAsync(
-        Socket gameSocket,
+    private Task RunGameWorkersAsync(
+        ChannelReader<PooledDatagram> reader,
         Socket tunnelSocket,
         IPEndPoint hubEndPoint,
-        PayloadEncoder encoder,
+        RuntimeBufferSizing bufferSizing,
+        CancellationToken cancellationToken)
+    {
+        var workerCount = Math.Max(1, _config.Runtime.ReceiveWorkerCount);
+        var workers = new Task[workerCount];
+        for (var index = 0; index < workerCount; index++)
+        {
+            workers[index] = RunGameProcessLoopAsync(reader, tunnelSocket, hubEndPoint, bufferSizing, cancellationToken);
+        }
+
+        return Task.WhenAll(workers);
+    }
+
+    private async Task RunGameProcessLoopAsync(
+        ChannelReader<PooledDatagram> reader,
+        Socket tunnelSocket,
+        IPEndPoint hubEndPoint,
         RuntimeBufferSizing bufferSizing,
         CancellationToken cancellationToken)
     {
         var receiveBuffer = new byte[bufferSizing.MaxPayloadSize];
         var encodedPayloadBuffer = new byte[bufferSizing.MaxCompressedPayloadSize];
         var frameBuffer = new byte[bufferSizing.MaxPacketSize];
+        using var encoder = new PayloadEncoder(_config.Runtime, bufferSizing);
 
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            var receiveResult = await UdpSocketIO.TryReceiveFromAsync(
-                gameSocket,
-                receiveBuffer,
-                CreateReceiveEndPoint(_config.GameListenEndpoint.Address),
-                _log,
-                cancellationToken);
-
-            if (receiveResult is not UdpSocketReceiveResult received)
+            while (await reader.WaitToReadAsync(cancellationToken))
             {
-                if (cancellationToken.IsCancellationRequested)
+                while (reader.TryRead(out var received))
                 {
-                    break;
+                    _counters.Increment(RuntimeCounter.QueueDequeued);
+
+                    using (received)
+                    {
+                        _counters.Increment(RuntimeCounter.EdgePacketsIn);
+
+                        if (!TryLearnClient(received.RemoteEndPoint))
+                        {
+                            continue;
+                        }
+
+                        if (!TryGetSessionId(out var sessionId))
+                        {
+                            continue;
+                        }
+
+                        received.Span.CopyTo(receiveBuffer);
+                        var payloadLength = received.Length;
+                        var encodeStartedAt = Stopwatch.GetTimestamp();
+                        var encodeResult = encoder.Encode(receiveBuffer.AsSpan(0, payloadLength), encodedPayloadBuffer, out var encodedBytesWritten);
+                        _counters.Increment(RuntimeCounter.EncodeOperations);
+                        _counters.Increment(RuntimeCounter.EncodeElapsedTicks, Stopwatch.GetTimestamp() - encodeStartedAt);
+
+                        if (encodeResult.IsOversizeDrop)
+                        {
+                            _counters.Increment(RuntimeCounter.OversizeDrop);
+                            continue;
+                        }
+
+                        var dataFrame = new DataFrame(sessionId, (ushort)payloadLength, encodeResult.IsCompressed);
+                        if (!LaneZstdFrameCodec.TryWriteData(dataFrame, encodedPayloadBuffer.AsSpan(0, encodedBytesWritten), frameBuffer, out var frameBytesWritten))
+                        {
+                            _counters.Increment(RuntimeCounter.ProtocolError);
+                            continue;
+                        }
+
+                        if (!await UdpSocketIO.TrySendAsync(tunnelSocket, frameBuffer.AsMemory(0, frameBytesWritten), hubEndPoint, _log, cancellationToken))
+                        {
+                            continue;
+                        }
+
+                        _counters.Increment(RuntimeCounter.HubPacketsOut);
+                        _counters.Increment(encodeResult.IsCompressed ? RuntimeCounter.CompressedFramesOut : RuntimeCounter.RawFramesOut);
+                        _counters.Increment(RuntimeCounter.RawBytesIn, payloadLength);
+                        _counters.Increment(RuntimeCounter.FramedBytesOut, frameBytesWritten);
+
+                        if (_verbose)
+                        {
+                            _log?.Invoke($"edge forwarded {payloadLength} bytes to hub as {(encodeResult.IsCompressed ? "compressed" : "raw")} frame for session {sessionId}");
+                        }
+                    }
                 }
-
-                continue;
             }
-
-            _counters.Increment(RuntimeCounter.EdgePacketsIn);
-
-            if (received.RemoteEndPoint is not IPEndPoint clientEndPoint)
-            {
-                continue;
-            }
-
-            if (!TryLearnClient(clientEndPoint))
-            {
-                continue;
-            }
-
-            if (!TryGetSessionId(out var sessionId))
-            {
-                continue;
-            }
-
-            var payloadLength = received.ReceivedBytes;
-            var encodeResult = encoder.Encode(receiveBuffer.AsSpan(0, payloadLength), encodedPayloadBuffer, out var encodedBytesWritten);
-
-            if (encodeResult.IsOversizeDrop)
-            {
-                _counters.Increment(RuntimeCounter.OversizeDrop);
-                continue;
-            }
-
-            var dataFrame = new DataFrame(sessionId, (ushort)payloadLength, encodeResult.IsCompressed);
-            if (!LaneZstdFrameCodec.TryWriteData(dataFrame, encodedPayloadBuffer.AsSpan(0, encodedBytesWritten), frameBuffer, out var frameBytesWritten))
-            {
-                _counters.Increment(RuntimeCounter.ProtocolError);
-                continue;
-            }
-
-            if (!await UdpSocketIO.TrySendAsync(tunnelSocket, frameBuffer.AsMemory(0, frameBytesWritten), hubEndPoint, _log, cancellationToken))
-            {
-                continue;
-            }
-
-            _counters.Increment(RuntimeCounter.HubPacketsOut);
-            _counters.Increment(encodeResult.IsCompressed ? RuntimeCounter.CompressedFramesOut : RuntimeCounter.RawFramesOut);
-            _counters.Increment(RuntimeCounter.RawBytesIn, payloadLength);
-            _counters.Increment(RuntimeCounter.FramedBytesOut, frameBytesWritten);
-
-            if (_verbose)
-            {
-                _log?.Invoke($"edge forwarded {payloadLength} bytes to hub as {(encodeResult.IsCompressed ? "compressed" : "raw")} frame for session {sessionId}");
-            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
     }
 
-    private async Task RunTunnelLoopAsync(
-        Socket tunnelSocket,
+    private async Task RunTunnelProcessLoopAsync(
+        ChannelReader<PooledDatagram> reader,
         Socket gameSocket,
         IPEndPoint hubEndPoint,
-        PayloadDecoder decoder,
         RuntimeBufferSizing bufferSizing,
         CancellationToken cancellationToken)
     {
         var receiveBuffer = new byte[bufferSizing.MaxReceiveBufferSize];
         var decodeBuffer = new byte[bufferSizing.MaxPayloadSize];
+        using var decoder = new PayloadDecoder();
 
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            var receiveResult = await UdpSocketIO.TryReceiveFromAsync(
-                tunnelSocket,
-                receiveBuffer,
-                CreateReceiveEndPoint(_config.BindEndpoint.Address),
-                _log,
-                cancellationToken);
-
-            if (receiveResult is not UdpSocketReceiveResult received)
+            while (await reader.WaitToReadAsync(cancellationToken))
             {
-                if (cancellationToken.IsCancellationRequested)
+                while (reader.TryRead(out var received))
                 {
-                    break;
+                    _counters.Increment(RuntimeCounter.QueueDequeued);
+
+                    using (received)
+                    {
+                        _counters.Increment(RuntimeCounter.HubPacketsIn);
+
+                        if (!received.RemoteEndPoint.Equals(hubEndPoint))
+                        {
+                            _counters.Increment(RuntimeCounter.SessionSenderMismatch);
+                            continue;
+                        }
+
+                        received.Span.CopyTo(receiveBuffer);
+                        if (!LaneZstdFrameCodec.TryRead(receiveBuffer.AsSpan(0, received.Length), out var header, out var body, out _))
+                        {
+                            _counters.Increment(RuntimeCounter.ProtocolError);
+                            continue;
+                        }
+
+                        switch (header.FrameType)
+                        {
+                            case FrameType.RegisterAck:
+                                HandleRegisterAck(header, body);
+                                break;
+                            case FrameType.Data:
+                                if (!TryPrepareInboundData(header, body, decoder, decodeBuffer, out var bytesWritten, out var clientEndPoint))
+                                {
+                                    break;
+                                }
+
+                                if (!await UdpSocketIO.TrySendAsync(gameSocket, decodeBuffer.AsMemory(0, bytesWritten), clientEndPoint, _log, cancellationToken))
+                                {
+                                    break;
+                                }
+
+                                _counters.Increment(RuntimeCounter.EdgePacketsOut);
+
+                                if (_verbose)
+                                {
+                                    _log?.Invoke($"edge forwarded {bytesWritten} bytes from hub to client for session {header.SessionId}");
+                                }
+
+                                break;
+                            case FrameType.Close:
+                                HandleClose(header);
+                                break;
+                            default:
+                                _counters.Increment(RuntimeCounter.ProtocolError);
+                                break;
+                        }
+                    }
                 }
-
-                continue;
             }
-
-            _counters.Increment(RuntimeCounter.HubPacketsIn);
-
-            if (received.RemoteEndPoint is not IPEndPoint remoteEndPoint)
-            {
-                continue;
-            }
-
-            if (!remoteEndPoint.Equals(hubEndPoint))
-            {
-                _counters.Increment(RuntimeCounter.SessionSenderMismatch);
-                continue;
-            }
-
-            if (!LaneZstdFrameCodec.TryRead(receiveBuffer.AsSpan(0, received.ReceivedBytes), out var header, out var body, out _))
-            {
-                _counters.Increment(RuntimeCounter.ProtocolError);
-                continue;
-            }
-
-            switch (header.FrameType)
-            {
-                case FrameType.RegisterAck:
-                    HandleRegisterAck(header, body);
-                    break;
-                case FrameType.Data:
-                    if (!TryPrepareInboundData(header, body, decoder, decodeBuffer, out var bytesWritten, out var clientEndPoint))
-                    {
-                        break;
-                    }
-
-                    if (!await UdpSocketIO.TrySendAsync(gameSocket, decodeBuffer.AsMemory(0, bytesWritten), clientEndPoint, _log, cancellationToken))
-                    {
-                        break;
-                    }
-
-                    _counters.Increment(RuntimeCounter.EdgePacketsOut);
-
-                    if (_verbose)
-                    {
-                        _log?.Invoke($"edge forwarded {bytesWritten} bytes from hub to client for session {header.SessionId}");
-                    }
-
-                    break;
-                case FrameType.Close:
-                    HandleClose(header);
-                    break;
-                default:
-                    _counters.Increment(RuntimeCounter.ProtocolError);
-                    break;
-            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
     }
 
@@ -313,7 +322,11 @@ public sealed class EdgeRuntime
             return false;
         }
 
-        if (!decoder.TryDecode(header, body, decodeBuffer, out bytesWritten))
+        var decodeStartedAt = Stopwatch.GetTimestamp();
+        var decoded = decoder.TryDecode(header, body, decodeBuffer, out bytesWritten);
+        _counters.Increment(RuntimeCounter.DecodeOperations);
+        _counters.Increment(RuntimeCounter.DecodeElapsedTicks, Stopwatch.GetTimestamp() - decodeStartedAt);
+        if (!decoded)
         {
             _counters.Increment(RuntimeCounter.DecompressError);
             return false;
@@ -375,6 +388,7 @@ public sealed class EdgeRuntime
     private static Socket CreateBoundSocket(UdpEndpoint endpoint)
     {
         var socket = new Socket(endpoint.Address.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+        UdpSocketIO.ConfigureBuffers(socket);
         socket.Bind(ToIPEndPoint(endpoint));
         return socket;
     }

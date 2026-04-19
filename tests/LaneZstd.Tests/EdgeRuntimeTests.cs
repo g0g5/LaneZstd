@@ -133,7 +133,7 @@ public sealed class EdgeRuntimeTests
             new UdpEndpoint(IPAddress.Loopback, edgeBindPort),
             new UdpEndpoint(IPAddress.Loopback, hubPort),
             new UdpEndpoint(IPAddress.Loopback, edgeGamePort),
-            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 1));
+            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 1, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1));
         var counters = new RuntimeCounters();
         var logs = new List<string>();
         using var hubSocket = BindLoopbackSocket(hubPort);
@@ -173,7 +173,7 @@ public sealed class EdgeRuntimeTests
             new UdpEndpoint(IPAddress.Loopback, edgeBindPort),
             new UdpEndpoint(IPAddress.Loopback, hubPort),
             new UdpEndpoint(IPAddress.Loopback, edgeGamePort),
-            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 0));
+            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 0, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1));
     }
 
     private static Socket BindLoopbackSocket(int? port = null)

@@ -4,4 +4,6 @@ public sealed record RuntimeOptions(
     int CompressThreshold,
     int CompressionLevel,
     int MaxPacketSize,
-    int StatsIntervalSeconds);
+    int StatsIntervalSeconds,
+    int ReceiveQueueCapacity,
+    int ReceiveWorkerCount);

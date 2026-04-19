@@ -7,7 +7,11 @@ public sealed class RuntimeCounters
     private long _activeSessions;
     private long _compressedFramesOut;
     private long _decompressError;
+    private long _decodeElapsedTicks;
+    private long _decodeOperations;
     private long _edgePacketsIn;
+    private long _encodeElapsedTicks;
+    private long _encodeOperations;
     private long _edgePacketsOut;
     private long _framedBytesOut;
     private long _gamePacketsIn;
@@ -17,6 +21,10 @@ public sealed class RuntimeCounters
     private long _oversizeDrop;
     private long _portPoolExhausted;
     private long _protocolError;
+    private long _queueCompleted;
+    private long _queueDequeued;
+    private long _queueDropped;
+    private long _queueEnqueued;
     private long _rawBytesIn;
     private long _rawFramesOut;
     private long _sessionSenderMismatch;
@@ -77,6 +85,30 @@ public sealed class RuntimeCounters
             case RuntimeCounter.DecompressError:
                 Interlocked.Add(ref _decompressError, amount);
                 break;
+            case RuntimeCounter.EncodeOperations:
+                Interlocked.Add(ref _encodeOperations, amount);
+                break;
+            case RuntimeCounter.EncodeElapsedTicks:
+                Interlocked.Add(ref _encodeElapsedTicks, amount);
+                break;
+            case RuntimeCounter.DecodeOperations:
+                Interlocked.Add(ref _decodeOperations, amount);
+                break;
+            case RuntimeCounter.DecodeElapsedTicks:
+                Interlocked.Add(ref _decodeElapsedTicks, amount);
+                break;
+            case RuntimeCounter.QueueEnqueued:
+                Interlocked.Add(ref _queueEnqueued, amount);
+                break;
+            case RuntimeCounter.QueueDequeued:
+                Interlocked.Add(ref _queueDequeued, amount);
+                break;
+            case RuntimeCounter.QueueDropped:
+                Interlocked.Add(ref _queueDropped, amount);
+                break;
+            case RuntimeCounter.QueueCompleted:
+                Interlocked.Add(ref _queueCompleted, amount);
+                break;
             case RuntimeCounter.UnknownSession:
                 Interlocked.Add(ref _unknownSession, amount);
                 break;
@@ -111,6 +143,14 @@ public sealed class RuntimeCounters
         OversizeDrop: Interlocked.Read(ref _oversizeDrop),
         ProtocolError: Interlocked.Read(ref _protocolError),
         DecompressError: Interlocked.Read(ref _decompressError),
+        EncodeOperations: Interlocked.Read(ref _encodeOperations),
+        EncodeElapsedTicks: Interlocked.Read(ref _encodeElapsedTicks),
+        DecodeOperations: Interlocked.Read(ref _decodeOperations),
+        DecodeElapsedTicks: Interlocked.Read(ref _decodeElapsedTicks),
+        QueueEnqueued: Interlocked.Read(ref _queueEnqueued),
+        QueueDequeued: Interlocked.Read(ref _queueDequeued),
+        QueueDropped: Interlocked.Read(ref _queueDropped),
+        QueueCompleted: Interlocked.Read(ref _queueCompleted),
         UnknownSession: Interlocked.Read(ref _unknownSession),
         SessionSenderMismatch: Interlocked.Read(ref _sessionSenderMismatch),
         PortPoolExhausted: Interlocked.Read(ref _portPoolExhausted),

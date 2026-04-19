@@ -28,6 +28,8 @@ public class CliTests
         Assert.Equal(3, config.Runtime.CompressionLevel);
         Assert.Equal(1200, config.Runtime.MaxPacketSize);
         Assert.Equal(5, config.Runtime.StatsIntervalSeconds);
+        Assert.Equal(256, config.Runtime.ReceiveQueueCapacity);
+        Assert.Equal(1, config.Runtime.ReceiveWorkerCount);
         Assert.True(cli.IsVerbose(parseResult));
     }
 
@@ -55,6 +57,8 @@ public class CliTests
         Assert.Equal(3, config.Runtime.CompressionLevel);
         Assert.Equal(1200, config.Runtime.MaxPacketSize);
         Assert.Equal(5, config.Runtime.StatsIntervalSeconds);
+        Assert.Equal(256, config.Runtime.ReceiveQueueCapacity);
+        Assert.Equal(1, config.Runtime.ReceiveWorkerCount);
         Assert.False(cli.IsVerbose(parseResult));
     }
 
@@ -158,6 +162,8 @@ public class CliTests
             "--compression-level", "23",
             "--max-packet-size", "127",
             "--stats-interval", "-1",
+            "--receive-queue-capacity", "0",
+            "--receive-worker-count", "0",
         ]);
 
         var success = cli.TryGetEdgeConfig(parseResult, out _, out var errors);
@@ -168,6 +174,8 @@ public class CliTests
         Assert.Contains("--compression-level must be between 1 and 22.", errors);
         Assert.Contains("--max-packet-size must be at least 128.", errors);
         Assert.Contains("--stats-interval must be zero or greater.", errors);
+        Assert.Contains("--receive-queue-capacity must be at least 1.", errors);
+        Assert.Contains("--receive-worker-count must be at least 1.", errors);
     }
 
     [Fact]
@@ -184,10 +192,13 @@ public class CliTests
             "--max-payload-bytes", "1350",
             "--seed", "1234",
             "--output", "json",
+            "--validate", "none",
             "--compress-threshold", "80",
             "--compression-level", "5",
             "--max-packet-size", "1400",
             "--stats-interval", "0",
+            "--receive-queue-capacity", "512",
+            "--receive-worker-count", "3",
         ]);
 
         var success = cli.TryGetBenchConfig(parseResult, out var config, out var errors);
@@ -201,11 +212,29 @@ public class CliTests
         Assert.Equal(700, config.AveragePayloadBytes);
         Assert.Equal(50, config.MinPayloadBytes);
         Assert.Equal(1350, config.MaxPayloadBytes);
+        Assert.Equal(BenchValidationMode.None, config.ValidationMode);
         Assert.Equal(1234, config.Seed);
         Assert.Equal("json", config.OutputFormat);
         Assert.Equal(80, config.Runtime.CompressThreshold);
         Assert.Equal(5, config.Runtime.CompressionLevel);
         Assert.Equal(1400, config.Runtime.MaxPacketSize);
         Assert.Equal(0, config.Runtime.StatsIntervalSeconds);
+        Assert.Equal(512, config.Runtime.ReceiveQueueCapacity);
+        Assert.Equal(3, config.Runtime.ReceiveWorkerCount);
+    }
+
+    [Fact]
+    public void BenchCommand_RejectsUnknownValidationMode()
+    {
+        var cli = CliApplication.BuildCli();
+        var parseResult = cli.RootCommand.Parse([
+            "bench",
+            "--validate", "fast",
+        ]);
+
+        var success = cli.TryGetBenchConfig(parseResult, out _, out var errors);
+
+        Assert.False(success);
+        Assert.Contains("--validate must be one of: integrity, json, none.", errors);
     }
 }

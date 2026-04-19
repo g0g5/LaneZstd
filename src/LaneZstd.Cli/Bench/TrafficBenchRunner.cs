@@ -18,14 +18,29 @@ public sealed record BenchConfig(
     int AveragePayloadBytes,
     int MinPayloadBytes,
     int MaxPayloadBytes,
+    BenchValidationMode ValidationMode,
     int Seed,
     string OutputFormat,
     RuntimeOptions Runtime);
+
+public enum BenchValidationMode
+{
+    Integrity = 0,
+    Json = 1,
+    None = 2,
+}
 
 public sealed record BenchDirectionMetrics(
     string Direction,
     long MessagesSent,
     long MessagesReceived,
+    long SendAttempts,
+    long SocketSendCompleted,
+    long ReceiverDatagrams,
+    long SourceIngressPackets,
+    long SourceTunnelOutPackets,
+    long DestinationTunnelInPackets,
+    long DestinationEgressPackets,
     long RawBytes,
     long FramedBytes,
     long RawFrames,
@@ -34,10 +49,19 @@ public sealed record BenchDirectionMetrics(
     double FramedBytesPerSecond,
     double CompressionRatio,
     double CompressionSavings,
+    BenchStageTimingMetrics SendPayloadGeneration,
+    BenchStageTimingMetrics ReceiveValidation,
+    BenchStageTimingMetrics SourceRuntimeEncode,
+    BenchStageTimingMetrics DestinationRuntimeDecode,
     long Lost,
     long Duplicated,
     long Corrupted,
     BenchCorruptionMetrics Corruption);
+
+public sealed record BenchStageTimingMetrics(
+    long Operations,
+    double TotalMilliseconds,
+    double AverageMicroseconds);
 
 public sealed record BenchCorruptionMetrics(
     long JsonInvalid,
@@ -60,7 +84,7 @@ public sealed record BenchResult(
 
         return string.Join(
             Environment.NewLine,
-            $"bench duration={MeasurementWindow.TotalSeconds:F2}s warmup={Config.Warmup.TotalSeconds:F2}s rate_per_direction={Config.MessagesPerSecond}/s payload_avg={Config.AveragePayloadBytes}B payload_range={Config.MinPayloadBytes}-{Config.MaxPayloadBytes}B seed={Config.Seed} threshold={Config.Runtime.CompressThreshold} level={Config.Runtime.CompressionLevel} max_packet={Config.Runtime.MaxPacketSize}",
+            $"bench duration={MeasurementWindow.TotalSeconds:F2}s warmup={Config.Warmup.TotalSeconds:F2}s rate_per_direction={Config.MessagesPerSecond}/s payload_avg={Config.AveragePayloadBytes}B payload_range={Config.MinPayloadBytes}-{Config.MaxPayloadBytes}B validate={Config.ValidationMode.ToString().ToLowerInvariant()} seed={Config.Seed} threshold={Config.Runtime.CompressThreshold} level={Config.Runtime.CompressionLevel} max_packet={Config.Runtime.MaxPacketSize}",
             FormatDirection(EdgeToHub),
             FormatDirection(HubToEdge),
             $"integrity sent={EdgeToHub.MessagesSent + HubToEdge.MessagesSent} received={EdgeToHub.MessagesReceived + HubToEdge.MessagesReceived} lost={EdgeToHub.Lost + HubToEdge.Lost} duplicated={EdgeToHub.Duplicated + HubToEdge.Duplicated} corrupted={EdgeToHub.Corrupted + HubToEdge.Corrupted}");
@@ -69,7 +93,7 @@ public sealed record BenchResult(
     private static string FormatDirection(BenchDirectionMetrics metrics) =>
         string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"{metrics.Direction} messages_sent={metrics.MessagesSent} messages_received={metrics.MessagesReceived} raw_bytes={metrics.RawBytes} framed_bytes={metrics.FramedBytes} raw_Bps={metrics.RawBytesPerSecond:F2} framed_Bps={metrics.FramedBytesPerSecond:F2} ratio={metrics.CompressionRatio:F2} savings={metrics.CompressionSavings:F2} raw_frames={metrics.RawFrames} compressed_frames={metrics.CompressedFrames} lost={metrics.Lost} duplicated={metrics.Duplicated} corrupted={metrics.Corrupted} corrupted_json={metrics.Corruption.JsonInvalid} corrupted_direction={metrics.Corruption.DirectionMismatch} corrupted_checksum={metrics.Corruption.ChecksumMismatch}");
+            $"{metrics.Direction} messages_sent={metrics.MessagesSent} messages_received={metrics.MessagesReceived} send_attempts={metrics.SendAttempts} socket_send_completed={metrics.SocketSendCompleted} receiver_datagrams={metrics.ReceiverDatagrams} source_in={metrics.SourceIngressPackets} source_tunnel_out={metrics.SourceTunnelOutPackets} dest_tunnel_in={metrics.DestinationTunnelInPackets} dest_out={metrics.DestinationEgressPackets} raw_bytes={metrics.RawBytes} framed_bytes={metrics.FramedBytes} raw_Bps={metrics.RawBytesPerSecond:F2} framed_Bps={metrics.FramedBytesPerSecond:F2} ratio={metrics.CompressionRatio:F2} savings={metrics.CompressionSavings:F2} raw_frames={metrics.RawFrames} compressed_frames={metrics.CompressedFrames} send_json_ops={metrics.SendPayloadGeneration.Operations} send_json_ms={metrics.SendPayloadGeneration.TotalMilliseconds:F2} send_json_us_avg={metrics.SendPayloadGeneration.AverageMicroseconds:F2} recv_validate_ops={metrics.ReceiveValidation.Operations} recv_validate_ms={metrics.ReceiveValidation.TotalMilliseconds:F2} recv_validate_us_avg={metrics.ReceiveValidation.AverageMicroseconds:F2} src_encode_ops={metrics.SourceRuntimeEncode.Operations} src_encode_ms={metrics.SourceRuntimeEncode.TotalMilliseconds:F2} src_encode_us_avg={metrics.SourceRuntimeEncode.AverageMicroseconds:F2} dst_decode_ops={metrics.DestinationRuntimeDecode.Operations} dst_decode_ms={metrics.DestinationRuntimeDecode.TotalMilliseconds:F2} dst_decode_us_avg={metrics.DestinationRuntimeDecode.AverageMicroseconds:F2} lost={metrics.Lost} duplicated={metrics.Duplicated} corrupted={metrics.Corrupted} corrupted_json={metrics.Corruption.JsonInvalid} corrupted_direction={metrics.Corruption.DirectionMismatch} corrupted_checksum={metrics.Corruption.ChecksumMismatch}");
 }
 
 public static class TrafficBenchRunner
@@ -122,8 +146,8 @@ public static class TrafficBenchRunner
             var hubToEdgeTracker = new TrafficDirectionTracker();
 
             using var receiverCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(runCancellationSource.Token);
-            var gameReceiveTask = ReceiveLoopAsync(gameSocket, "edge->hub", edgeToHubTracker, receiverCancellationSource.Token);
-            var clientReceiveTask = ReceiveLoopAsync(clientSocket, "hub->edge", hubToEdgeTracker, receiverCancellationSource.Token);
+            var gameReceiveTask = ReceiveLoopAsync(gameSocket, "edge->hub", edgeToHubTracker, config.ValidationMode, receiverCancellationSource.Token);
+            var clientReceiveTask = ReceiveLoopAsync(clientSocket, "hub->edge", hubToEdgeTracker, config.ValidationMode, receiverCancellationSource.Token);
 
             var stopwatch = Stopwatch.StartNew();
             var totalDuration = config.Warmup + config.Duration;
@@ -157,8 +181,8 @@ public static class TrafficBenchRunner
                               hubToEdgeTracker.Corrupted == 0 && hubToEdgeTracker.Duplicated == 0 && hubToEdgeTracker.Lost == 0,
                 Config: config,
                 MeasurementWindow: measurementWindow,
-                EdgeToHub: CreateDirectionMetrics("edge->hub", edgeToHubTracker, edgeDelta, measurementWindow),
-                HubToEdge: CreateDirectionMetrics("hub->edge", hubToEdgeTracker, hubDelta, measurementWindow));
+                EdgeToHub: CreateDirectionMetrics("edge->hub", edgeToHubTracker, edgeDelta, hubDelta, measurementWindow),
+                HubToEdge: CreateDirectionMetrics("hub->edge", hubToEdgeTracker, hubDelta, edgeDelta, measurementWindow));
 
             return result;
         }
@@ -174,7 +198,7 @@ public static class TrafficBenchRunner
         var payload = TrafficPayloadFactory.Create("edge->hub", sequence: -1, seed, averagePayloadBytes: 384, minPayloadBytes: 320, maxPayloadBytes: 448);
         await clientSocket.SendToAsync(payload.Bytes, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, edgeGamePort), cancellationToken);
         var receiveResult = await ReceiveAsync(gameSocket, cancellationToken);
-        if (!TrafficPayloadValidator.TryValidate(receiveResult.Buffer, "edge->hub", out _, out _))
+        if (!TrafficPayloadValidator.TryValidate(receiveResult.Buffer, "edge->hub", BenchValidationMode.Integrity, out _, out _))
         {
             throw new InvalidOperationException("Failed to establish benchmark session using seed traffic.");
         }
@@ -211,16 +235,23 @@ public static class TrafficBenchRunner
                 await Task.Delay(delay, cancellationToken);
             }
 
+            var generationStartedAt = Stopwatch.GetTimestamp();
             var generated = TrafficPayloadFactory.Create(direction, sequence, random, config.AveragePayloadBytes, config.MinPayloadBytes, config.MaxPayloadBytes);
             var shouldMeasure = dueAt >= config.Warmup;
             if (shouldMeasure)
             {
+                tracker.RecordSendPayloadGeneration(Stopwatch.GetTimestamp() - generationStartedAt);
+                tracker.RecordSendAttempt();
                 tracker.RecordSent(sequence, generated.Checksum);
             }
 
             try
             {
                 await socket.SendToAsync(generated.Bytes, SocketFlags.None, destination, cancellationToken);
+                if (shouldMeasure)
+                {
+                    tracker.RecordSocketSendCompleted();
+                }
             }
             catch
             {
@@ -236,14 +267,24 @@ public static class TrafficBenchRunner
         }
     }
 
-    private static async Task ReceiveLoopAsync(Socket socket, string expectedDirection, TrafficDirectionTracker tracker, CancellationToken cancellationToken)
+    private static async Task ReceiveLoopAsync(Socket socket, string expectedDirection, TrafficDirectionTracker tracker, BenchValidationMode validationMode, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
                 var receiveResult = await ReceiveAsync(socket, cancellationToken);
-                if (!TrafficPayloadValidator.TryValidate(receiveResult.Buffer, expectedDirection, out var payload, out var error))
+                tracker.RecordReceiveDatagram();
+                if (validationMode == BenchValidationMode.None)
+                {
+                    tracker.RecordReceivedUnvalidated();
+                    continue;
+                }
+
+                var validationStartedAt = Stopwatch.GetTimestamp();
+                var isValid = TrafficPayloadValidator.TryValidate(receiveResult.Buffer, expectedDirection, validationMode, out var payload, out var error);
+                tracker.RecordReceiveValidation(Stopwatch.GetTimestamp() - validationStartedAt);
+                if (!isValid)
                 {
                     tracker.RecordCorrupted(payload, error);
                     continue;
@@ -258,21 +299,37 @@ public static class TrafficBenchRunner
         }
     }
 
-    private static BenchDirectionMetrics CreateDirectionMetrics(string direction, TrafficDirectionTracker tracker, RuntimeStatsSnapshot delta, TimeSpan measurementWindow)
+    private static BenchDirectionMetrics CreateDirectionMetrics(string direction, TrafficDirectionTracker tracker, RuntimeStatsSnapshot sourceDelta, RuntimeStatsSnapshot destinationDelta, TimeSpan measurementWindow)
     {
         var seconds = Math.Max(measurementWindow.TotalSeconds, 0.001d);
+        var sourceIngressPackets = direction == "edge->hub" ? sourceDelta.EdgePacketsIn : sourceDelta.GamePacketsIn;
+        var sourceTunnelOutPackets = sourceDelta.HubPacketsOut;
+        var destinationTunnelInPackets = destinationDelta.HubPacketsIn;
+        var destinationEgressPackets = direction == "edge->hub" ? destinationDelta.GamePacketsOut : destinationDelta.EdgePacketsOut;
+
         return new BenchDirectionMetrics(
             Direction: direction,
             MessagesSent: tracker.Sent,
             MessagesReceived: tracker.Received,
-            RawBytes: delta.RawBytesIn,
-            FramedBytes: delta.FramedBytesOut,
-            RawFrames: delta.RawFramesOut,
-            CompressedFrames: delta.CompressedFramesOut,
-            RawBytesPerSecond: delta.RawBytesIn / seconds,
-            FramedBytesPerSecond: delta.FramedBytesOut / seconds,
-            CompressionRatio: delta.CompressionRatio,
-            CompressionSavings: delta.CompressionSavings,
+            SendAttempts: tracker.SendAttempts,
+            SocketSendCompleted: tracker.SocketSendCompleted,
+            ReceiverDatagrams: tracker.ReceiveDatagrams,
+            SourceIngressPackets: sourceIngressPackets,
+            SourceTunnelOutPackets: sourceTunnelOutPackets,
+            DestinationTunnelInPackets: destinationTunnelInPackets,
+            DestinationEgressPackets: destinationEgressPackets,
+            RawBytes: sourceDelta.RawBytesIn,
+            FramedBytes: sourceDelta.FramedBytesOut,
+            RawFrames: sourceDelta.RawFramesOut,
+            CompressedFrames: sourceDelta.CompressedFramesOut,
+            RawBytesPerSecond: sourceDelta.RawBytesIn / seconds,
+            FramedBytesPerSecond: sourceDelta.FramedBytesOut / seconds,
+            CompressionRatio: sourceDelta.CompressionRatio,
+            CompressionSavings: sourceDelta.CompressionSavings,
+            SendPayloadGeneration: tracker.SendPayloadGeneration,
+            ReceiveValidation: tracker.ReceiveValidation,
+            SourceRuntimeEncode: new BenchStageTimingMetrics(sourceDelta.EncodeOperations, sourceDelta.EncodeElapsedMilliseconds, sourceDelta.EncodeAverageMicroseconds),
+            DestinationRuntimeDecode: new BenchStageTimingMetrics(destinationDelta.DecodeOperations, destinationDelta.DecodeElapsedMilliseconds, destinationDelta.DecodeAverageMicroseconds),
             Lost: tracker.Lost,
             Duplicated: tracker.Duplicated,
             Corrupted: tracker.Corrupted,
@@ -320,6 +377,14 @@ public static class TrafficBenchRunner
         OversizeDrop: current.OversizeDrop - baseline.OversizeDrop,
         ProtocolError: current.ProtocolError - baseline.ProtocolError,
         DecompressError: current.DecompressError - baseline.DecompressError,
+        EncodeOperations: current.EncodeOperations - baseline.EncodeOperations,
+        EncodeElapsedTicks: current.EncodeElapsedTicks - baseline.EncodeElapsedTicks,
+        DecodeOperations: current.DecodeOperations - baseline.DecodeOperations,
+        DecodeElapsedTicks: current.DecodeElapsedTicks - baseline.DecodeElapsedTicks,
+        QueueEnqueued: current.QueueEnqueued - baseline.QueueEnqueued,
+        QueueDequeued: current.QueueDequeued - baseline.QueueDequeued,
+        QueueDropped: current.QueueDropped - baseline.QueueDropped,
+        QueueCompleted: current.QueueCompleted - baseline.QueueCompleted,
         UnknownSession: current.UnknownSession - baseline.UnknownSession,
         SessionSenderMismatch: current.SessionSenderMismatch - baseline.SessionSenderMismatch,
         PortPoolExhausted: current.PortPoolExhausted - baseline.PortPoolExhausted,
@@ -339,6 +404,7 @@ public static class TrafficBenchRunner
     private static Socket BindLoopbackSocket(int? port = null)
     {
         var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        UdpSocketIO.ConfigureBuffers(socket);
         socket.Bind(new IPEndPoint(IPAddress.Loopback, port ?? 0));
         return socket;
     }
@@ -404,6 +470,14 @@ internal sealed class TrafficDirectionTracker
     private readonly ConcurrentDictionary<long, string> _sentChecksums = new();
     private readonly ConcurrentDictionary<long, byte> _receivedSequences = new();
     private long _duplicates;
+    private long _receivedUnvalidated;
+    private long _receiveDatagrams;
+    private long _receiveValidationOperations;
+    private long _receiveValidationTicks;
+    private long _sendAttempts;
+    private long _sendPayloadGenerationOperations;
+    private long _sendPayloadGenerationTicks;
+    private long _socketSendCompleted;
     private long _jsonInvalid;
     private long _directionMismatch;
     private long _checksumMismatch;
@@ -412,13 +486,23 @@ internal sealed class TrafficDirectionTracker
 
     public long Sent => _sentChecksums.Count;
 
-    public long Received => _receivedSequences.Count;
+    public long Received => _receivedSequences.Count + Interlocked.Read(ref _receivedUnvalidated);
 
     public long Corrupted => Interlocked.Read(ref _jsonInvalid) + Interlocked.Read(ref _directionMismatch) + Interlocked.Read(ref _checksumMismatch);
 
     public long Duplicated => Interlocked.Read(ref _duplicates);
 
+    public long ReceiveDatagrams => Interlocked.Read(ref _receiveDatagrams);
+
+    public long SendAttempts => Interlocked.Read(ref _sendAttempts);
+
+    public long SocketSendCompleted => Interlocked.Read(ref _socketSendCompleted);
+
     public long Lost => Math.Max(0, Sent - Received);
+
+    public BenchStageTimingMetrics SendPayloadGeneration => CreateTimingMetrics(Interlocked.Read(ref _sendPayloadGenerationOperations), Interlocked.Read(ref _sendPayloadGenerationTicks));
+
+    public BenchStageTimingMetrics ReceiveValidation => CreateTimingMetrics(Interlocked.Read(ref _receiveValidationOperations), Interlocked.Read(ref _receiveValidationTicks));
 
     public BenchCorruptionMetrics Corruption => new(
         JsonInvalid: Interlocked.Read(ref _jsonInvalid),
@@ -441,6 +525,25 @@ internal sealed class TrafficDirectionTracker
         {
             Touch();
         }
+    }
+
+    public void RecordSendAttempt()
+    {
+        Interlocked.Increment(ref _sendAttempts);
+        Touch();
+    }
+
+    public void RecordSendPayloadGeneration(long elapsedTicks)
+    {
+        Interlocked.Increment(ref _sendPayloadGenerationOperations);
+        Interlocked.Add(ref _sendPayloadGenerationTicks, elapsedTicks);
+        Touch();
+    }
+
+    public void RecordSocketSendCompleted()
+    {
+        Interlocked.Increment(ref _socketSendCompleted);
+        Touch();
     }
 
     public void RollbackSent(long sequence)
@@ -470,6 +573,33 @@ internal sealed class TrafficDirectionTracker
             Interlocked.Increment(ref _duplicates);
         }
 
+        Touch();
+    }
+
+    public void RecordReceivedUnvalidated()
+    {
+        Interlocked.Increment(ref _receivedUnvalidated);
+        Touch();
+    }
+
+    public void RecordReceiveDatagram()
+    {
+        if (Interlocked.Read(ref _measurementStarted) == 1)
+        {
+            Interlocked.Increment(ref _receiveDatagrams);
+            Touch();
+        }
+    }
+
+    public void RecordReceiveValidation(long elapsedTicks)
+    {
+        if (Interlocked.Read(ref _measurementStarted) != 1)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _receiveValidationOperations);
+        Interlocked.Add(ref _receiveValidationTicks, elapsedTicks);
         Touch();
     }
 
@@ -511,6 +641,13 @@ internal sealed class TrafficDirectionTracker
     }
 
     private void Touch() => Interlocked.Exchange(ref _lastActivityTimestamp, Stopwatch.GetTimestamp());
+
+    private static BenchStageTimingMetrics CreateTimingMetrics(long operations, long elapsedTicks)
+    {
+        var totalMilliseconds = elapsedTicks * 1000d / Stopwatch.Frequency;
+        var averageMicroseconds = operations == 0 ? 0d : elapsedTicks * 1_000_000d / Stopwatch.Frequency / operations;
+        return new BenchStageTimingMetrics(operations, totalMilliseconds, averageMicroseconds);
+    }
 }
 
 public static class TrafficPayloadFactory
@@ -662,7 +799,7 @@ public static class TrafficPayloadFactory
 
 public static class TrafficPayloadValidator
 {
-    public static bool TryValidate(byte[] buffer, string expectedDirection, out TrafficPayload? payload, out TrafficPayloadValidationError error)
+    public static bool TryValidate(byte[] buffer, string expectedDirection, BenchValidationMode validationMode, out TrafficPayload? payload, out TrafficPayloadValidationError error)
     {
         payload = null;
         error = TrafficPayloadValidationError.None;
@@ -680,6 +817,11 @@ public static class TrafficPayloadValidator
             {
                 error = TrafficPayloadValidationError.UnexpectedDirection;
                 return false;
+            }
+
+            if (validationMode == BenchValidationMode.Json)
+            {
+                return true;
             }
 
             var checksum = TrafficPayloadFactory.ComputeChecksum(new TrafficPayloadUnsigned(
@@ -752,6 +894,7 @@ public sealed record TrafficPayloadUnsigned(
 [JsonSerializable(typeof(BenchConfig))]
 [JsonSerializable(typeof(BenchDirectionMetrics))]
 [JsonSerializable(typeof(BenchResult))]
+[JsonSerializable(typeof(BenchStageTimingMetrics))]
 [JsonSerializable(typeof(TrafficPayload))]
 [JsonSerializable(typeof(TrafficPayloadUnsigned))]
 internal sealed partial class TrafficPayloadJsonContext : JsonSerializerContext

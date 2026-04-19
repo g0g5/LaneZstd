@@ -12,6 +12,8 @@ internal static class CliDefaults
     public const int CompressionLevel = 3;
     public const int MaxPacketSize = 1200;
     public const int StatsIntervalSeconds = 5;
+    public const int ReceiveQueueCapacity = 256;
+    public const int ReceiveWorkerCount = 1;
     public const int SessionIdleTimeoutSeconds = 30;
     public const int UnspecifiedMaxSessions = -1;
     public const int BenchDurationSeconds = 30;
@@ -66,6 +68,14 @@ public static class CliApplication
         {
             Description = "Stats interval in seconds. Zero disables periodic stats.",
         };
+        var edgeReceiveQueueCapacityOption = new Option<int>("--receive-queue-capacity")
+        {
+            Description = "Per-ingress channel capacity before datagrams are dropped.",
+        };
+        var edgeReceiveWorkerCountOption = new Option<int>("--receive-worker-count")
+        {
+            Description = "Queued datagram worker count for edge data processing.",
+        };
 
         var edgeCommand = new Command("edge", "Run edge node")
         {
@@ -76,6 +86,8 @@ public static class CliApplication
             edgeCompressionLevelOption,
             edgeMaxPacketSizeOption,
             edgeStatsIntervalOption,
+            edgeReceiveQueueCapacityOption,
+            edgeReceiveWorkerCountOption,
         };
 
         edgeCommand.Validators.Add(result =>
@@ -83,7 +95,14 @@ public static class CliApplication
             ValidateEndpointOption(result, edgeBindOption, "--bind", allowWildcard: true, fallbackValue: CliDefaults.BindEndpointText);
             ValidateEndpointOption(result, edgeHubOption, "--hub", allowWildcard: false);
             ValidateEndpointOption(result, edgeGameListenOption, "--game-listen", allowWildcard: false);
-            ValidateSharedRuntimeOptions(result, edgeCompressThresholdOption, edgeCompressionLevelOption, edgeMaxPacketSizeOption, edgeStatsIntervalOption);
+            ValidateSharedRuntimeOptions(
+                result,
+                edgeCompressThresholdOption,
+                edgeCompressionLevelOption,
+                edgeMaxPacketSizeOption,
+                edgeStatsIntervalOption,
+                edgeReceiveQueueCapacityOption,
+                edgeReceiveWorkerCountOption);
 
             if (!TryGetEndpoint(result, edgeBindOption, out var bindEndpoint, CliDefaults.BindEndpointText) ||
                 !TryGetEndpoint(result, edgeGameListenOption, out var gameListenEndpoint))
@@ -135,6 +154,14 @@ public static class CliApplication
         {
             Description = "Stats interval in seconds. Zero disables periodic stats.",
         };
+        var hubReceiveQueueCapacityOption = new Option<int>("--receive-queue-capacity")
+        {
+            Description = "Per-ingress channel capacity before datagrams are dropped.",
+        };
+        var hubReceiveWorkerCountOption = new Option<int>("--receive-worker-count")
+        {
+            Description = "Queued datagram worker count for hub tunnel data processing.",
+        };
 
         var benchDurationSecondsOption = new Option<int>("--duration-seconds")
         {
@@ -168,6 +195,10 @@ public static class CliApplication
         {
             Description = "Benchmark output format: text or json.",
         };
+        var benchValidateOption = new Option<string>("--validate")
+        {
+            Description = "Benchmark validation mode: integrity, json, or none.",
+        };
         var benchCompressThresholdOption = new Option<int>("--compress-threshold")
         {
             Description = "Compression threshold in bytes.",
@@ -184,6 +215,14 @@ public static class CliApplication
         {
             Description = "Stats interval in seconds. Zero disables periodic stats.",
         };
+        var benchReceiveQueueCapacityOption = new Option<int>("--receive-queue-capacity")
+        {
+            Description = "Per-ingress channel capacity before datagrams are dropped.",
+        };
+        var benchReceiveWorkerCountOption = new Option<int>("--receive-worker-count")
+        {
+            Description = "Queued datagram worker count for edge and hub data processing.",
+        };
 
         var benchCommand = new Command("bench", "Run local loopback traffic benchmark")
         {
@@ -195,15 +234,25 @@ public static class CliApplication
             benchMaxPayloadBytesOption,
             benchSeedOption,
             benchOutputOption,
+            benchValidateOption,
             benchCompressThresholdOption,
             benchCompressionLevelOption,
             benchMaxPacketSizeOption,
             benchStatsIntervalOption,
+            benchReceiveQueueCapacityOption,
+            benchReceiveWorkerCountOption,
         };
 
         benchCommand.Validators.Add(result =>
         {
-            ValidateSharedRuntimeOptions(result, benchCompressThresholdOption, benchCompressionLevelOption, benchMaxPacketSizeOption, benchStatsIntervalOption);
+            ValidateSharedRuntimeOptions(
+                result,
+                benchCompressThresholdOption,
+                benchCompressionLevelOption,
+                benchMaxPacketSizeOption,
+                benchStatsIntervalOption,
+                benchReceiveQueueCapacityOption,
+                benchReceiveWorkerCountOption);
 
             if (GetOptionValue(result, benchDurationSecondsOption, CliDefaults.BenchDurationSeconds) < 1)
             {
@@ -244,6 +293,12 @@ public static class CliApplication
             {
                 result.AddError("--output must be either text or json.");
             }
+
+            var validationMode = GetOptionValue(result, benchValidateOption, BenchValidationMode.Integrity.ToString()).ToLowerInvariant();
+            if (validationMode is not "integrity" and not "json" and not "none")
+            {
+                result.AddError("--validate must be one of: integrity, json, none.");
+            }
         });
 
         var hubCommand = new Command("hub", "Run hub node")
@@ -257,6 +312,8 @@ public static class CliApplication
             hubCompressionLevelOption,
             hubMaxPacketSizeOption,
             hubStatsIntervalOption,
+            hubReceiveQueueCapacityOption,
+            hubReceiveWorkerCountOption,
         };
 
         hubCommand.Validators.Add(result =>
@@ -264,7 +321,14 @@ public static class CliApplication
             ValidateEndpointOption(result, hubBindOption, "--bind", allowWildcard: true, fallbackValue: CliDefaults.BindEndpointText);
             ValidateEndpointOption(result, hubGameOption, "--game", allowWildcard: false);
             ValidateSessionPortRangeOption(result, sessionPortRangeOption);
-            ValidateSharedRuntimeOptions(result, hubCompressThresholdOption, hubCompressionLevelOption, hubMaxPacketSizeOption, hubStatsIntervalOption);
+            ValidateSharedRuntimeOptions(
+                result,
+                hubCompressThresholdOption,
+                hubCompressionLevelOption,
+                hubMaxPacketSizeOption,
+                hubStatsIntervalOption,
+                hubReceiveQueueCapacityOption,
+                hubReceiveWorkerCountOption);
 
             var sessionIdleTimeout = GetOptionValue(result, sessionIdleTimeoutOption, CliDefaults.SessionIdleTimeoutSeconds);
             if (sessionIdleTimeout < 1)
@@ -321,6 +385,8 @@ public static class CliApplication
             edgeCompressionLevelOption,
             edgeMaxPacketSizeOption,
             edgeStatsIntervalOption,
+            edgeReceiveQueueCapacityOption,
+            edgeReceiveWorkerCountOption,
             hubBindOption,
             hubGameOption,
             sessionPortRangeOption,
@@ -330,6 +396,8 @@ public static class CliApplication
             hubCompressionLevelOption,
             hubMaxPacketSizeOption,
             hubStatsIntervalOption,
+            hubReceiveQueueCapacityOption,
+            hubReceiveWorkerCountOption,
             benchDurationSecondsOption,
             benchWarmupSecondsOption,
             benchMessagesPerSecondOption,
@@ -338,10 +406,13 @@ public static class CliApplication
             benchMaxPayloadBytesOption,
             benchSeedOption,
             benchOutputOption,
+            benchValidateOption,
             benchCompressThresholdOption,
             benchCompressionLevelOption,
             benchMaxPacketSizeOption,
-            benchStatsIntervalOption);
+            benchStatsIntervalOption,
+            benchReceiveQueueCapacityOption,
+            benchReceiveWorkerCountOption);
     }
 
     private static void ValidateEndpointOption(CommandResult result, Option<string> option, string alias, bool allowWildcard, string? fallbackValue = null)
@@ -371,7 +442,9 @@ public static class CliApplication
         Option<int> compressThresholdOption,
         Option<int> compressionLevelOption,
         Option<int> maxPacketSizeOption,
-        Option<int> statsIntervalOption)
+        Option<int> statsIntervalOption,
+        Option<int> receiveQueueCapacityOption,
+        Option<int> receiveWorkerCountOption)
     {
         if (GetOptionValue(result, compressThresholdOption, CliDefaults.CompressThreshold) < 0)
         {
@@ -392,6 +465,16 @@ public static class CliApplication
         if (GetOptionValue(result, statsIntervalOption, CliDefaults.StatsIntervalSeconds) < 0)
         {
             result.AddError("--stats-interval must be zero or greater.");
+        }
+
+        if (GetOptionValue(result, receiveQueueCapacityOption, CliDefaults.ReceiveQueueCapacity) < 1)
+        {
+            result.AddError("--receive-queue-capacity must be at least 1.");
+        }
+
+        if (GetOptionValue(result, receiveWorkerCountOption, CliDefaults.ReceiveWorkerCount) < 1)
+        {
+            result.AddError("--receive-worker-count must be at least 1.");
         }
     }
 
@@ -418,6 +501,8 @@ public sealed class CliDefinition(
     Option<int> edgeCompressionLevelOption,
     Option<int> edgeMaxPacketSizeOption,
     Option<int> edgeStatsIntervalOption,
+    Option<int> edgeReceiveQueueCapacityOption,
+    Option<int> edgeReceiveWorkerCountOption,
     Option<string> hubBindOption,
     Option<string> hubGameOption,
     Option<string> sessionPortRangeOption,
@@ -427,6 +512,8 @@ public sealed class CliDefinition(
     Option<int> hubCompressionLevelOption,
     Option<int> hubMaxPacketSizeOption,
     Option<int> hubStatsIntervalOption,
+    Option<int> hubReceiveQueueCapacityOption,
+    Option<int> hubReceiveWorkerCountOption,
     Option<int> benchDurationSecondsOption,
     Option<int> benchWarmupSecondsOption,
     Option<int> benchMessagesPerSecondOption,
@@ -435,10 +522,13 @@ public sealed class CliDefinition(
     Option<int> benchMaxPayloadBytesOption,
     Option<int?> benchSeedOption,
     Option<string> benchOutputOption,
+    Option<string> benchValidateOption,
     Option<int> benchCompressThresholdOption,
     Option<int> benchCompressionLevelOption,
     Option<int> benchMaxPacketSizeOption,
-    Option<int> benchStatsIntervalOption)
+    Option<int> benchStatsIntervalOption,
+    Option<int> benchReceiveQueueCapacityOption,
+    Option<int> benchReceiveWorkerCountOption)
 {
     public RootCommand RootCommand { get; } = rootCommand;
 
@@ -461,7 +551,9 @@ public sealed class CliDefinition(
                 GetOptionValue(parseResult, edgeCompressThresholdOption, CliDefaults.CompressThreshold),
                 GetOptionValue(parseResult, edgeCompressionLevelOption, CliDefaults.CompressionLevel),
                 GetOptionValue(parseResult, edgeMaxPacketSizeOption, CliDefaults.MaxPacketSize),
-                GetOptionValue(parseResult, edgeStatsIntervalOption, CliDefaults.StatsIntervalSeconds)));
+                GetOptionValue(parseResult, edgeStatsIntervalOption, CliDefaults.StatsIntervalSeconds),
+                GetOptionValue(parseResult, edgeReceiveQueueCapacityOption, CliDefaults.ReceiveQueueCapacity),
+                GetOptionValue(parseResult, edgeReceiveWorkerCountOption, CliDefaults.ReceiveWorkerCount)));
 
         return true;
     }
@@ -492,7 +584,9 @@ public sealed class CliDefinition(
                 GetOptionValue(parseResult, hubCompressThresholdOption, CliDefaults.CompressThreshold),
                 GetOptionValue(parseResult, hubCompressionLevelOption, CliDefaults.CompressionLevel),
                 GetOptionValue(parseResult, hubMaxPacketSizeOption, CliDefaults.MaxPacketSize),
-                GetOptionValue(parseResult, hubStatsIntervalOption, CliDefaults.StatsIntervalSeconds)));
+                GetOptionValue(parseResult, hubStatsIntervalOption, CliDefaults.StatsIntervalSeconds),
+                GetOptionValue(parseResult, hubReceiveQueueCapacityOption, CliDefaults.ReceiveQueueCapacity),
+                GetOptionValue(parseResult, hubReceiveWorkerCountOption, CliDefaults.ReceiveWorkerCount)));
 
         return true;
     }
@@ -513,13 +607,16 @@ public sealed class CliDefinition(
             AveragePayloadBytes: GetOptionValue(parseResult, benchAveragePayloadBytesOption, CliDefaults.BenchAveragePayloadBytes),
             MinPayloadBytes: GetOptionValue(parseResult, benchMinPayloadBytesOption, CliDefaults.BenchMinPayloadBytes),
             MaxPayloadBytes: GetOptionValue(parseResult, benchMaxPayloadBytesOption, CliDefaults.BenchMaxPayloadBytes),
+            ValidationMode: ParseBenchValidationMode(GetOptionValue(parseResult, benchValidateOption, BenchValidationMode.Integrity.ToString())),
             Seed: parseResult.GetValue(benchSeedOption) ?? Environment.TickCount,
             OutputFormat: GetOptionValue(parseResult, benchOutputOption, CliDefaults.BenchOutputFormat).ToLowerInvariant(),
             Runtime: new RuntimeOptions(
                 GetOptionValue(parseResult, benchCompressThresholdOption, CliDefaults.CompressThreshold),
                 GetOptionValue(parseResult, benchCompressionLevelOption, CliDefaults.CompressionLevel),
                 GetOptionValue(parseResult, benchMaxPacketSizeOption, CliDefaults.MaxPacketSize),
-                GetOptionValue(parseResult, benchStatsIntervalOption, CliDefaults.StatsIntervalSeconds)));
+                GetOptionValue(parseResult, benchStatsIntervalOption, CliDefaults.StatsIntervalSeconds),
+                GetOptionValue(parseResult, benchReceiveQueueCapacityOption, CliDefaults.ReceiveQueueCapacity),
+                GetOptionValue(parseResult, benchReceiveWorkerCountOption, CliDefaults.ReceiveWorkerCount)));
 
         return true;
     }
@@ -540,6 +637,15 @@ public sealed class CliDefinition(
 
     private static T GetOptionValue<T>(ParseResult parseResult, Option<T> option, T fallbackValue) =>
         parseResult.GetResult(option) is null ? fallbackValue : parseResult.GetValue(option)!;
+
+    private static BenchValidationMode ParseBenchValidationMode(string value) =>
+        value.ToLowerInvariant() switch
+        {
+            "integrity" => BenchValidationMode.Integrity,
+            "json" => BenchValidationMode.Json,
+            "none" => BenchValidationMode.None,
+            _ => throw new InvalidOperationException($"Unsupported bench validation mode '{value}'."),
+        };
 }
 
 public static class Program

@@ -153,7 +153,7 @@ public sealed class HubRuntimeTests
             new SessionPortRange(sessionPort, sessionPort),
             SessionIdleTimeoutSeconds: 5,
             MaxSessions: 1,
-            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 1));
+            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 1, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1));
         var counters = new RuntimeCounters();
         var logs = new List<string>();
         using var edgeSocket = BindLoopbackSocket();
@@ -195,7 +195,7 @@ public sealed class HubRuntimeTests
             new SessionPortRange(sessionStartPort, sessionEndPort),
             idleTimeoutSeconds,
             maxSessions,
-            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 0));
+            new RuntimeOptions(CompressThreshold: 32, CompressionLevel: 3, MaxPacketSize: 1200, StatsIntervalSeconds: 0, ReceiveQueueCapacity: 256, ReceiveWorkerCount: 1));
     }
 
     private static (int startPort, int endPort) ReserveUdpPortRange(int count)
